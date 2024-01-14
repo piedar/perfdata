@@ -1,0 +1,19 @@
+#!/bin/bash
+
+function debug() {
+	echo >&2 "${0}: ${@}"
+}
+
+(return 0 2>/dev/null) && debug "this script cannot be sourced" && return 1
+
+set -e
+
+: "${PERFDATA_PROFILE_DIR:?}"
+: "${PERFDATA_BINARIES:?}" # whitespace separated list of binary paths
+: "${PERFDATA_PROFDATA_OUTPUT:=${1:-default.profdata}}"
+
+BINARY_PARAMETERS="$(printf -- '--binary=%s ' ${PERFDATA_BINARIES})"
+
+find "${PERFDATA_PROFILE_DIR:?}" -type f -name "*.perfdata" -exec \
+	llvm-profgen --perfdata='{}' ${BINARY_PARAMETERS} --format=text --output=- \; |
+	llvm-profdata merge --sample - --output="${PERFDATA_PROFDATA_OUTPUT}"
