@@ -8,6 +8,8 @@ function debug() {
 
 set -e
 
+SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[@]})")")"
+
 function die() {
 	debug "${@}"
 	exit 1
@@ -34,12 +36,10 @@ PERFDATA_PROFILE="${PERFDATA_PROFILE:-${EXE_NAME}}"
 PERFDATA_PROFILE_DIR="${PERFDATA_DIR}/${PERFDATA_PROFILE}"
 mkdir -p "${PERFDATA_PROFILE_DIR}"
 
-PERFDATA_OUTPUT="${PERFDATA_PROFILE_DIR}/perf-${EXE_HASH}-$(date --utc +'%s')-$$.data"
+: "${PERFDATA_STAMP:=${EXE_HASH}}"
+PERFDATA_OUTPUT="${PERFDATA_PROFILE_DIR}/${PERFDATA_STAMP}-$(date --utc +'%s')-$$.perfdata"
 #debug "saving perfdata to ${PERFDATA_OUTPUT}"
 
-# delete all perf reports created with a different exe version
-find "${PERFDATA_PROFILE_DIR}" -type f ! -name "perf-${EXE_HASH}-*" -delete
-# delete old perf reports - todo: this should keep the ~20 most recent
-find "${PERFDATA_PROFILE_DIR}" -type f -mtime +31 -delete
+PERFDATA_PROFILE_DIR="${PERFDATA_PROFILE_DIR}" "${SCRIPT_DIR}/perfdata-cleanup"
 
 exec perf record --branch-filter any,u --output "${PERFDATA_OUTPUT}" -- "${@}"

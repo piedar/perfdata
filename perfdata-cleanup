@@ -1,0 +1,40 @@
+#!/bin/bash
+
+function debug() {
+	echo >&2 "${0}: ${@}"
+}
+
+(return 0 2>/dev/null) && debug "this script cannot be sourced" && return 1
+
+set -e
+
+function die() {
+	debug "${@}"
+	exit 1
+}
+
+: "${PERFDATA_PROFILE_DIR:?}"
+
+# delete perfdata created with a different exe version
+# todo: not sure about this
+#: "${PERFDATA_PROFILE_DISCARD_MISMATCHED:=false}"
+#"${PERFDATA_PROFILE_DISCARD_MISMATCHED}" &&
+#	find "${PERFDATA_PROFILE_DIR}" -type f ! -name "perf-${PERFDATA_STAMP}-*" -delete
+
+# delete old perfdata
+: "${PERFDATA_PROFILE_MAX_AGE_DAYS:=60}"
+[ -n "${PERFDATA_PROFILE_MAX_AGE_DAYS}" ] &&
+	find "${PERFDATA_PROFILE_DIR}" -type f -mtime "+${PERFDATA_PROFILE_MAX_AGE_DAYS}" -delete
+
+# delete oldest perfdata until max size is achieved
+: "${PERFDATA_PROFILE_MAX_SIZE:=10G}"
+[ -n "${PERFDATA_PROFILE_MAX_SIZE}" ] && {
+	find "${PERFDATA_PROFILE_DIR}" -type f -printf "%T@::%s::%p\n" | sort -rn |
+		awk -F '::' -v max_size="$(numfmt --from=auto "${PERFDATA_PROFILE_MAX_SIZE}")" '
+			BEGIN { current_size = 0; }
+			{
+				current_size += $2;
+				if (current_size > max_size) { printf "%s\0", $3 }
+			}
+		' | xargs -0 --no-run-if-empty rm
+}
