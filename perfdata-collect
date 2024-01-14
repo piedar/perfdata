@@ -1,0 +1,45 @@
+#!/bin/bash
+
+function debug() {
+	echo >&2 "${0}: ${@}"
+}
+
+(return 0 2>/dev/null) && debug "this script cannot be sourced" && return 1
+
+set -e
+
+function die() {
+	debug "${@}"
+	exit 1
+}
+
+function hashsum() {
+	sha256sum "${@}" | awk '{ print $1 }'
+}
+
+
+COMMAND="${1:?COMMAND not specified}"
+
+EXE_PATH="$(type -p "${COMMAND}")"
+if [ -z "${EXE_PATH}" ]; then
+	debug "COMMAND ${COMMAND} has no executable path (is it a shell builtin?)"
+	exec "${@}"
+fi
+
+EXE_NAME="$(basename "$(realpath "${EXE_PATH}")")"
+EXE_HASH="$(hashsum "${EXE_PATH}")"
+
+PERFDATA_DIR="${PERFDATA_DIR:-${XDG_CACHE_HOME:-${HOME:?}/.cache}/perfdata}"
+PERFDATA_PROFILE="${PERFDATA_PROFILE:-${EXE_NAME}}"
+PERFDATA_PROFILE_DIR="${PERFDATA_DIR}/${PERFDATA_PROFILE}"
+mkdir -p "${PERFDATA_PROFILE_DIR}"
+
+PERFDATA_OUTPUT="${PERFDATA_PROFILE_DIR}/perf-${EXE_HASH}-$(date --utc +'%s')-$$.data"
+#debug "saving perfdata to ${PERFDATA_OUTPUT}"
+
+# delete all perf reports created with a different exe version
+find "${PERFDATA_PROFILE_DIR}" -type f ! -name "perf-${EXE_HASH}-*" -delete
+# delete old perf reports - todo: this should keep the ~20 most recent
+find "${PERFDATA_PROFILE_DIR}" -type f -mtime +31 -delete
+
+exec perf record --branch-filter any,u --output "${PERFDATA_OUTPUT}" -- "${@}"
