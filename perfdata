@@ -8,8 +8,6 @@ function debug() {
 
 set -e
 
-SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[@]})")")"
-
 function die() {
 	debug "${@}"
 	exit 1
@@ -19,10 +17,12 @@ function hashsum() {
 	sha256sum "${@}" | awk '{ print $1 }'
 }
 
+SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[@]})")")"
+
 
 COMMAND="${1:?COMMAND not specified}"
 
-EXE_PATH="$(type -p "${COMMAND}")"
+EXE_PATH="$(type -p "${COMMAND}" || true)"
 if [ -z "${EXE_PATH}" ]; then
 	debug "COMMAND ${COMMAND} has no executable path (is it a shell builtin?)"
 	exec "${@}"
