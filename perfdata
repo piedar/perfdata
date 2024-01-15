@@ -29,15 +29,15 @@ if [ -z "${EXE_PATH}" ]; then
 	exec "${@}"
 fi
 
-EXE_NAME="$(basename "$(realpath "${EXE_PATH}")")"
-EXE_HASH="$(hashsum "${EXE_PATH}")"
-
-PERFDATA_DIR="${PERFDATA_DIR:-${XDG_CACHE_HOME:-${HOME:?}/.cache}/perfdata}"
-PERFDATA_PROFILE="${PERFDATA_PROFILE:-${EXE_NAME}}"
-PERFDATA_PROFILE_DIR="${PERFDATA_DIR}/${PERFDATA_PROFILE}"
+if [ -z "${PERFDATA_PROFILE_DIR}" ]; then
+	EXE_NAME="$(basename "$(realpath "${EXE_PATH}")")"
+	: "${PERFDATA_DIR:=${XDG_CACHE_HOME:-${HOME:?}/.cache}/perfdata}"
+	: "${PERFDATA_PROFILE:=${EXE_NAME}}"
+	PERFDATA_PROFILE_DIR="${PERFDATA_DIR}/${PERFDATA_PROFILE}"
+fi
 mkdir -p "${PERFDATA_PROFILE_DIR}"
 
-: "${PERFDATA_STAMP:=${EXE_HASH}}"
+: "${PERFDATA_STAMP:=$(hashsum "${EXE_PATH}")}"
 PERFDATA_OUTPUT="${PERFDATA_PROFILE_DIR}/${PERFDATA_STAMP}-$(date --utc +'%s')-$$.perfdata"
 #debug "saving perfdata to ${PERFDATA_OUTPUT}"
 
