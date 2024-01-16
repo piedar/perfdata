@@ -43,4 +43,11 @@ PERFDATA_OUTPUT="${PERFDATA_PROFILE_DIR}/${PERFDATA_STAMP}-$(date --utc +'%s')-$
 
 PERFDATA_PROFILE_DIR="${PERFDATA_PROFILE_DIR}" "${SCRIPT_DIR}/perfdata-cleanup"
 
-exec perf record --branch-filter any,u --output "${PERFDATA_OUTPUT}" -- "${@}"
+# compression levels >= 16 cause lost samples on my system
+# compression has diminishing returns after about level 8
+
+# the output of llvm-profgen is tiny by comparison
+# unfortunately llvm-profgen does not accept piped input
+# todo: run the conversion immediately after the process exits
+
+exec perf record --branch-filter any,u --compression-level=8 --output "${PERFDATA_OUTPUT}" -- "${@}"
