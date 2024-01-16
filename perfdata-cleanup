@@ -30,12 +30,15 @@ function die() {
 # delete oldest perfdata until max size is achieved
 : "${PERFDATA_PROFILE_MAX_SIZE:=10G}"
 [ -n "${PERFDATA_PROFILE_MAX_SIZE}" ] && {
-	find "${PERFDATA_PROFILE_DIR}" -type f -printf "%T@::%s::%p\n" | sort -rn |
+	# for each file, find mtime::size::sparseness::path
+	# multiplying size by sparseness accounts for filesystem compression
+	# skip newer files until total size exceeds max, then delete the rest
+	find "${PERFDATA_PROFILE_DIR}" -type f -printf "%T@::%s::%S::%p\n" | sort -rn |
 		awk -F '::' -v max_size="$(numfmt --from=auto "${PERFDATA_PROFILE_MAX_SIZE}")" '
 			BEGIN { current_size = 0; }
 			{
-				current_size += $2;
-				if (current_size > max_size) { printf "%s\0", $3 }
+				current_size += $2 * $3;
+				if (current_size > max_size) { printf "%s\0", $4 }
 			}
 		' | xargs -0 --no-run-if-empty rm
 }
