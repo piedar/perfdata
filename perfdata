@@ -51,14 +51,16 @@ perf record --freq=max --branch-filter 'any,u' --mmap-flush=100K \
 
 # the output of llvm-profgen is tiny by comparison
 # do the conversion now if so configured
-# todo: disown or otherwise daemonize this part
 if "${PERFDATA_CONVERT_PROF:-false}"; then
 	PROF_OUTPUT="${PERFDATA_OUTPUT}.prof"
-	if [ ! -f "${PROF_OUTPUT}" ]; then
-		"${SCRIPT_DIR}/perf2prof" "${PERFDATA_OUTPUT}" --binary "${EXE_PATH}" --output "${PROF_OUTPUT}"
-		chmod 0440 "${PROF_OUTPUT}"
-	fi
-	rm "${PERFDATA_OUTPUT}"
+	debug "converting ${PROF_OUTPUT} in the background"
+	nohup bash -c "
+		if [ ! -f "${PROF_OUTPUT}" ]; then
+			"${SCRIPT_DIR}/perf2prof" "${PERFDATA_OUTPUT}" --binary "${EXE_PATH}" --output "${PROF_OUTPUT}"
+			chmod 0440 "${PROF_OUTPUT}"
+		fi
+		rm "${PERFDATA_OUTPUT}"
+	" >&"${PROF_OUTPUT}.log" &
 else
 	chmod 0440 "${PERFDATA_OUTPUT}"
 fi
