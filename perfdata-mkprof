@@ -1,0 +1,86 @@
+#!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-only
+
+debug() {
+	echo >&2 "${0}: ${@}"
+}
+
+(return 0 2>/dev/null) && debug "this script cannot be sourced" && return 1
+
+set -e
+
+print_help() {
+	<<EOF cat >&2
+usage: ${0} --binary <b> [--output {default.prof}] <file|directory>...
+
+This program accepts a set of .perfdata (perf-record) and/or .prof (llvm) files.
+It converts each foo.perfdata to foo.perfdata.prof, removing the source file unless write access is denied.
+It then merges the converted files with existing specified .prof files.
+
+--binary <b>              binary used when capturing the .perfdata files (required unless all inputs are .prof already)
+[--output {default.prof}] output file for the combined .prof result
+EOF
+}
+
+readonly SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[@]})")")"
+
+PERFDATA_INPUTS=()
+PERFDATA_BINARIES=()
+
+# todo: accept arguments in the form --output=foo
+while [[ $# -gt 0 ]]; do
+	case $1 in
+		-h|--help) print_help; exit 0 ;;
+		--binary) PERFDATA_BINARIES+=("${2}"); shift ;;
+		-o|--output) PROF_OUTPUT="${2}"; shift ;;
+		# todo
+		#--pid) PERFDATA_PID="${2}"; shift ;;
+		*) PERFDATA_INPUTS+=("${1}") ;;
+	esac
+	shift
+done
+
+: "${PROF_OUTPUT:=default.prof}"
+readarray -d '' PERFDATA_FILES < <(find "${PERFDATA_INPUTS[@]}" -type f -name '*.perfdata' -print0 | sort --unique --zero-terminated)
+
+PERFDATA_TMPDIR="$(mktemp -d)"
+trap "rm -rf ${PERFDATA_TMPDIR}" EXIT
+
+PROF_SOURCES=()
+PROFGEN_FILES=()
+for perfdata in "${PERFDATA_FILES[@]}"; do
+	profdata="${perfdata}.prof"
+	if [ -f "${profdata:?}" ]; then
+		PROF_SOURCES+=("${profdata:?}")
+		continue
+	fi
+
+	: "${BINARY_PARAMETERS:=$(printf -- '--binary %s ' ${PERFDATA_BINARIES[@]:?})}"
+
+	# run each task in the background and write the resulting filename to an output pipe
+	# https://stackoverflow.com/questions/51849506/adding-process-substitutions-to-a-command-line-with-a-loop-in-bash
+	exec {pfd}< <(
+		PROF_OUTPUT_TMP="${PERFDATA_TMPDIR:?}/$(basename "${profdata:?}")"
+		"${SCRIPT_DIR}/perf2prof" "${perfdata}" ${BINARY_PARAMETERS} --output "${PROF_OUTPUT_TMP}" >&2
+
+		# if we have write access, leave only .prof behind
+		if mv --no-target-directory "${PROF_OUTPUT_TMP:?}" "${profdata:?}" >&2; then
+			chmod --reference="${perfdata:?}" "${profdata:?}" >&2
+			rm -f "${perfdata:?}" >&2
+			echo "${profdata:?}"
+		else
+			echo "${PROF_OUTPUT_TMP:?}"
+		fi
+	)
+	PROFGEN_FILES+=("/dev/fd/${pfd}")
+done
+
+# once the tasks are done, read the resulting filenames and close the file descriptors
+wait
+for pfd in "${PROFGEN_FILES[@]#/dev/fd/}"; do
+	PROF_SOURCES+=("$(<"/dev/fd/${pfd}")")
+	exec {pfd}>&-
+done
+
+readarray -d '' PROF_FILES < <(find "${PERFDATA_INPUTS[@]}" -type f -name '*.prof' -print0 | sort --unique --zero-terminated)
+llvm-profdata merge --sample ${PROF_FILES[@]} ${PROF_SOURCES[@]} --output="${PROF_OUTPUT}"

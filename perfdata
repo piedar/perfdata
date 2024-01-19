@@ -46,9 +46,19 @@ PERFDATA_PROFILE_DIR="${PERFDATA_PROFILE_DIR}" "${SCRIPT_DIR}/perfdata-cleanup"
 # compression levels >= 10 cause lost samples on my system
 # compression has diminishing returns after about level 8
 
-# the output of llvm-profgen is tiny by comparison
-# unfortunately llvm-profgen does not accept piped input
-# todo: run the conversion immediately after the process exits
-
-exec perf record --freq=max --branch-filter 'any,u' --mmap-flush=100K \
+perf record --freq=max --branch-filter 'any,u' --mmap-flush=100K \
 	--compression-level=8 --output "${PERFDATA_OUTPUT}" -- "${@}"
+
+# the output of llvm-profgen is tiny by comparison
+# do the conversion now if so configured
+# todo: disown or otherwise daemonize this part
+if "${PERFDATA_CONVERT_PROF:-false}"; then
+	PROF_OUTPUT="${PERFDATA_OUTPUT}.prof"
+	if [ ! -f "${PROF_OUTPUT}" ]; then
+		"${SCRIPT_DIR}/perf2prof" "${PERFDATA_OUTPUT}" --binary "${EXE_PATH}" --output "${PROF_OUTPUT}"
+		chmod 0440 "${PROF_OUTPUT}"
+	fi
+	rm "${PERFDATA_OUTPUT}"
+else
+	chmod 0440 "${PERFDATA_OUTPUT}"
+fi
