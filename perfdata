@@ -29,6 +29,8 @@ if [ -z "${EXE_PATH}" ]; then
 	exec "${@}"
 fi
 
+umask 0027
+
 if [ -z "${PERFDATA_PROFILE_DIR}" ]; then
 	EXE_NAME="$(basename "$(realpath "${EXE_PATH}")")"
 	: "${PERFDATA_DIR:=${XDG_CACHE_HOME:-${HOME:?}/.cache}/perfdata}"
@@ -58,6 +60,8 @@ flock --exclusive --timeout 10 --no-fork "${PERFDATA_JOB_DIR}" \
 # with --switch-output there are 1 or more files named like ${PERFDATA_OUTPUT}.{timestamp}
 # --switch-output cannot be read by perf-script when compressed?
 
+chmod -R ug+rX "${PERFDATA_JOB_DIR}"
+
 # the output of llvm-profgen is tiny by comparison
 # do the conversion now if so configured
 if "${PERFDATA_CONVERT_PROF:-false}"; then
@@ -65,6 +69,4 @@ if "${PERFDATA_CONVERT_PROF:-false}"; then
 	debug "converting ${PROF_OUTPUT} in the background"
 	nohup "${SCRIPT_DIR}/perfdata-mkprof" "${PERFDATA_JOB_DIR}" \
 		--binary "${EXE_PATH}" --output "/dev/null" >&"${PROF_OUTPUT}.log" &
-else
-	chmod -R ug+rX "${PERFDATA_JOB_DIR}"
 fi

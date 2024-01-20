@@ -77,7 +77,8 @@ for perfdata in "${PERFDATA_FILES[@]}"; do
 
 		# if we have write access, leave only .prof behind
 		if mv --no-target-directory "${PROF_OUTPUT_TMP:?}" "${prof:?}" >&2; then
-			#chmod --reference="${perfdata:?}" "${prof:?}" >&2
+			chmod --reference="${perfdata:?}" "${prof:?}" >&2
+			chmod -x "${prof:?}" >&2 # in case perfdata is a directory
 			rm -rf "${perfdata:?}" >&2
 			echo "${prof:?}"
 		else
