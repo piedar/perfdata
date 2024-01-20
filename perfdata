@@ -50,7 +50,8 @@ mkdir -p "${PERFDATA_JOB_DIR}"
 
 # todo: might rely on EXE_CACHE instead of buildid
 
-perf record --branch-filter 'any,u' --mmap-flush=128K \
+flock --exclusive --timeout 10 --no-fork "${PERFDATA_JOB_DIR}" \
+	perf record --branch-filter 'any,u' --mmap-flush=128K \
 	--switch-output=1G --no-no-buildid \
 	--output "${PERFDATA_JOB_DIR}/perfdata" -- "${@}"
 

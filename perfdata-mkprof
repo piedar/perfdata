@@ -49,25 +49,37 @@ trap "rm -rf ${PERFDATA_TMPDIR}" EXIT
 PROF_SOURCES=()
 PROFGEN_FILES=()
 for perfdata in "${PERFDATA_FILES[@]}"; do
-	profdata="${perfdata}.prof"
-	if [ -f "${profdata:?}" ]; then
-		PROF_SOURCES+=("${profdata:?}")
-		continue
-	fi
+	prof="${perfdata}.prof"
 
 	: "${BINARY_PARAMETERS:=$(printf -- '--binary %s ' ${PERFDATA_BINARIES[@]:?})}"
 
 	# run each task in the background and write the resulting filename to an output pipe
 	# https://stackoverflow.com/questions/51849506/adding-process-substitutions-to-a-command-line-with-a-loop-in-bash
 	exec {pfd}< <(
-		PROF_OUTPUT_TMP="${PERFDATA_TMPDIR:?}/$(basename "${profdata:?}")"
+		# if prof already exists return it when it's ready
+		if exec &>/dev/null {prof_fd}<"${prof:?}" && flock >&2 "${prof_fd}" && [ -s "${prof}" ]; then
+			echo "${prof}"
+			exit 0
+		fi
+
+		# don't try to read perfdata while it's still being written
+		# this might bail out, but that's fine
+		# todo: does this belong in perf2prof?
+		exec {perfdata_fd}<"${perfdata}"
+		flock >&2 --nonblock "${perfdata_fd}"
+
+		# try to take a write lock on prof
+		exec {prof_fd}>>"${prof:?}" &&
+			flock --exclusive "${prof_fd}" >&2 || debug "prof_fd lock failed - no write access?"
+
+		PROF_OUTPUT_TMP="${PERFDATA_TMPDIR:?}/$(basename "${prof:?}")"
 		"${SCRIPT_DIR}/perf2prof" "${perfdata}" ${BINARY_PARAMETERS} --output "${PROF_OUTPUT_TMP}" >&2
 
 		# if we have write access, leave only .prof behind
-		if mv --no-target-directory "${PROF_OUTPUT_TMP:?}" "${profdata:?}" >&2; then
-			#chmod --reference="${perfdata:?}" "${profdata:?}" >&2
+		if mv --no-target-directory "${PROF_OUTPUT_TMP:?}" "${prof:?}" >&2; then
+			#chmod --reference="${perfdata:?}" "${prof:?}" >&2
 			rm -rf "${perfdata:?}" >&2
-			echo "${profdata:?}"
+			echo "${prof:?}"
 		else
 			echo "${PROF_OUTPUT_TMP:?}"
 		fi
