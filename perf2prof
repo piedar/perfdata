@@ -11,9 +11,9 @@ set -e
 
 print_help() {
 	<<EOF cat >&2
-usage: ${0} --binary <b> [--output {default.prof}] [--pid {}] <file>...
+usage: ${0} --binary <b> [--output {default.prof}] [--pid {}] <file|directory>...
 
-This program converts all provided .perfdata (perf record) files to .prof (llvm) format.
+This program converts all provided .perfdata (perf record) files and/or directories to .prof (llvm) format.
 It combines them into a single output file without leaving any intermediate files behind.
 
 --binary <b>              binary used when capturing the .perfdata files (required)
@@ -59,16 +59,19 @@ if ${PERFDATA_HAS_PIPING_PROF}; then
 	# https://stackoverflow.com/questions/51849506/adding-process-substitutions-to-a-command-line-with-a-loop-in-bash
 	PROFGEN_FILES=()
 	for PERFDATA in "${PERFDATA_INPUTS[@]}"; do
-		exec {pfd}< <(_perf-script -i "${PERFDATA}" |
+		# single file or all files in a directory
+		[ -d "${PERFDATA}" ] && ALL_FILES=("${PERFDATA}"/*) || ALL_FILES=("${PERFDATA}")
+
+		exec {prof_fd}< <( for F in "${ALL_FILES[@]}"; do _perf-script -i "${F}"; done |
 			llvm-profgen --perfscript=/dev/stdin ${BINARY_PARAMETERS} --format=text --output=-)
-		PROFGEN_FILES+=("/dev/fd/${pfd}")
+		PROFGEN_FILES+=("/dev/fd/${prof_fd}")
 	done
 
 	llvm-profdata merge --sample "${PROFGEN_FILES[@]}" --output="${PROF_OUTPUT}"
 
 	# close the temporary file descriptors
-	for pfd in "${PROFGEN_FILES[@]#/dev/fd/}"; do
-		exec {pfd}>&-
+	for prof_fd in "${PROFGEN_FILES[@]#/dev/fd/}"; do
+		exec {prof_fd}>&-
 	done
 
 	exit 0
@@ -83,15 +86,18 @@ trap "rm -rf ${PERFDATA_TMPDIR}" EXIT
 
 PROFGEN_FILES=()
 
-for perfdata in "${PERFDATA_INPUTS[@]}"; do
-	PERFDATA_PATH="$(realpath "${perfdata}")"
-
+for PERFDATA in "${PERFDATA_INPUTS[@]}"; do
 	# llvm-profgen accepts --perfdata= but it writes the script to a tmp file in the same location as the input
 	# https://github.com/llvm/llvm-project/blob/llvmorg-17.0.6/llvm/tools/llvm-profgen/PerfReader.cpp#L354
 	# use a temporary location to avoid directory pollution
 
+	# single file or all files in a directory
+	[ -d "${PERFDATA}" ] && ALL_FILES=("${PERFDATA}"/*) || ALL_FILES=("${PERFDATA}")
+
 	perfscript="$(mktemp --suffix='.perfscript' --tmpdir="${PERFDATA_TMPDIR}")"
-	_perf-script -i "${PERFDATA_PATH}" > "${perfscript}"
+	for PFD in "${ALL_FILES[@]}"; do
+		_perf-script -i "${PFD:?}" >> "${perfscript:?}"
+	done
 
 	profdata="$(mktemp --dry-run --suffix='.prof' --tmpdir="${PERFDATA_TMPDIR}")"
 	llvm-profgen --perfscript="${perfscript}" ${BINARY_PARAMETERS} --output="${profdata}"

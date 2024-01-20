@@ -41,7 +41,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 : "${PROF_OUTPUT:=default.prof}"
-readarray -d '' PERFDATA_FILES < <(find "${PERFDATA_INPUTS[@]}" -type f -name '*.perfdata' -print0 | sort --unique --zero-terminated)
+readarray -d '' PERFDATA_FILES < <(find "${PERFDATA_INPUTS[@]}" -name '*.perfdata' \( -type f -or -type d \) -print0 | sort --unique --zero-terminated)
 
 PERFDATA_TMPDIR="$(mktemp -d)"
 trap "rm -rf ${PERFDATA_TMPDIR}" EXIT
@@ -65,8 +65,8 @@ for perfdata in "${PERFDATA_FILES[@]}"; do
 
 		# if we have write access, leave only .prof behind
 		if mv --no-target-directory "${PROF_OUTPUT_TMP:?}" "${profdata:?}" >&2; then
-			chmod --reference="${perfdata:?}" "${profdata:?}" >&2
-			rm -f "${perfdata:?}" >&2
+			#chmod --reference="${perfdata:?}" "${profdata:?}" >&2
+			rm -rf "${perfdata:?}" >&2
 			echo "${profdata:?}"
 		else
 			echo "${PROF_OUTPUT_TMP:?}"

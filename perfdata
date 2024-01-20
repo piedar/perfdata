@@ -35,32 +35,35 @@ if [ -z "${PERFDATA_PROFILE_DIR}" ]; then
 	: "${PERFDATA_PROFILE:=${EXE_NAME}}"
 	PERFDATA_PROFILE_DIR="${PERFDATA_DIR}/${PERFDATA_PROFILE}"
 fi
-mkdir -p "${PERFDATA_PROFILE_DIR}"
 
 : "${PERFDATA_STAMP:=$(hashsum "${EXE_PATH}")}"
-PERFDATA_OUTPUT="${PERFDATA_PROFILE_DIR}/${PERFDATA_STAMP}-$(date --utc +'%s')-$$.perfdata"
-#debug "saving perfdata to ${PERFDATA_OUTPUT}"
+PERFDATA_ID="${PERFDATA_STAMP}-$(date --utc +'%s')-$$"
+PERFDATA_JOB_DIR="${PERFDATA_PROFILE_DIR}/${PERFDATA_ID}.perfdata"
+mkdir -p "${PERFDATA_JOB_DIR}"
 
-PERFDATA_PROFILE_DIR="${PERFDATA_PROFILE_DIR}" "${SCRIPT_DIR}/perfdata-cleanup"
+# todo: re-enable cleanup
+#PERFDATA_PROFILE_DIR="${PERFDATA_PROFILE_DIR}" "${SCRIPT_DIR}/perfdata-cleanup"
 
+# compression uses extra cpu time - much more at higher levels
 # compression levels >= 10 cause lost samples on my system
 # compression has diminishing returns after about level 8
 
-perf record --freq=max --branch-filter 'any,u' --mmap-flush=100K \
-	--compression-level=8 --output "${PERFDATA_OUTPUT}" -- "${@}"
+# todo: might rely on EXE_CACHE instead of buildid
+
+perf record --branch-filter 'any,u' --mmap-flush=128K \
+	--switch-output=1G --no-no-buildid \
+	--output "${PERFDATA_JOB_DIR}/perfdata" -- "${@}"
+
+# with --switch-output there are 1 or more files named like ${PERFDATA_OUTPUT}.{timestamp}
+# --switch-output cannot be read by perf-script when compressed?
 
 # the output of llvm-profgen is tiny by comparison
 # do the conversion now if so configured
 if "${PERFDATA_CONVERT_PROF:-false}"; then
-	PROF_OUTPUT="${PERFDATA_OUTPUT}.prof"
+	PROF_OUTPUT="${PERFDATA_JOB_DIR}.prof"
 	debug "converting ${PROF_OUTPUT} in the background"
-	nohup bash -c "
-		if [ ! -f "${PROF_OUTPUT}" ]; then
-			"${SCRIPT_DIR}/perf2prof" "${PERFDATA_OUTPUT}" --binary "${EXE_PATH}" --output "${PROF_OUTPUT}"
-			chmod 0440 "${PROF_OUTPUT}"
-		fi
-		rm "${PERFDATA_OUTPUT}"
-	" >&"${PROF_OUTPUT}.log" &
+	nohup "${SCRIPT_DIR}/perfdata-mkprof" "${PERFDATA_JOB_DIR}" \
+		--binary "${EXE_PATH}" --output "/dev/null" >&"${PROF_OUTPUT}.log" &
 else
-	chmod 0440 "${PERFDATA_OUTPUT}"
+	chmod -R ug+rX "${PERFDATA_JOB_DIR}"
 fi
