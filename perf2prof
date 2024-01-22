@@ -48,7 +48,8 @@ BINARY_PARAMETERS="$(printf -- '--binary=%s ' ${PERFDATA_BINARIES[@]:?})"
 [ -n "${PERFDATA_PID}" ] && PID_PARAMETERS="$(printf -- '--pid=%s ' ${PERFDATA_PID})"
 
 _perf-script() {
-	perf script --force --show-mmap-events ${PID_PARAMETERS} -F 'ip,brstack' "${@}"
+	# llvm-profgen chokes if the script contains any extra info - weirdly --hide-call-graph is necessary only when reading stdin
+	perf script --force --show-mmap-events --hide-call-graph -F 'ip,brstack' ${PID_PARAMETERS} "${@}"
 }
 
 # my patched llvm-profgen accepts a piped perfscript and llvm-profdata accepts piped file descriptors

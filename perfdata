@@ -41,10 +41,50 @@ fi
 : "${PERFDATA_STAMP:=$(hashsum "${EXE_PATH}")}"
 PERFDATA_ID="${PERFDATA_STAMP}-$(date --utc +'%s')-$$"
 PERFDATA_JOB_DIR="${PERFDATA_PROFILE_DIR}/${PERFDATA_ID}.perfdata"
-mkdir -p "${PERFDATA_JOB_DIR}"
 
 # todo: re-enable cleanup
 #PERFDATA_PROFILE_DIR="${PERFDATA_PROFILE_DIR}" "${SCRIPT_DIR}/perfdata-cleanup"
+
+# the output of llvm-profgen is tiny by comparison
+# do the conversion now if so configured
+if "${PERFDATA_CONVERT_PROF:-false}"; then
+	PROF_OUTPUT="${PERFDATA_JOB_DIR}.prof"
+	PROF_OUTPUT_PART="${PROF_OUTPUT}.part"
+
+	exec {p2p_fd}> >(
+		set -m # use separate process group so this part doesn't get interrupted
+		{
+			"${SCRIPT_DIR}/perf2prof" '-' --binary "${EXE_PATH}" --output "${PROF_OUTPUT_PART}" &&
+				mv --no-target-directory "${PROF_OUTPUT_PART}" "${PROF_OUTPUT}"
+		} || cat >/dev/null # perf2prof failed - ignore remaining input
+	)
+
+	stop_p2p() {
+		# perf-record is already dead so we need to close the pipe before waiting
+		debug "finishing perf2prof conversion..."
+		exec {p2p_fd}>&-
+		wait
+	}
+	trap stop_p2p SIGINT
+
+	# perf can pipe to stdout, but then the command's stdout gets sent to stderr
+	# my patched perf can write to a named fifo pipe, keeping the command's pipes intact
+	[[ "$(perf record --branch-filter 'any,u' -o >(cat > /dev/null) echo 2>&1)" == *"failed to mmap file"* ]] &&
+		PERDATA_HAS_PIPING_PERF=false || PERDATA_HAS_PIPING_PERF=true
+
+	if "${PERDATA_HAS_PIPING_PERF}"; then
+		perf record --branch-filter 'any,u' --mmap-flush=128K \
+			--output="/dev/fd/${p2p_fd}" -- "${@}"
+	else
+		perf record --branch-filter 'any,u' --mmap-flush=128K \
+			--output='-' -- "${@}" >"/dev/fd/${p2p_fd}"
+	fi
+
+	stop_p2p
+	exit 0
+fi
+
+mkdir -p "${PERFDATA_JOB_DIR}"
 
 # compression uses extra cpu time - much more at higher levels
 # compression levels >= 10 cause lost samples on my system
@@ -61,12 +101,3 @@ flock --exclusive --timeout 10 --no-fork "${PERFDATA_JOB_DIR}" \
 # --switch-output cannot be read by perf-script when compressed?
 
 chmod -R ug+rX "${PERFDATA_JOB_DIR}"
-
-# the output of llvm-profgen is tiny by comparison
-# do the conversion now if so configured
-if "${PERFDATA_CONVERT_PROF:-false}"; then
-	PROF_OUTPUT="${PERFDATA_JOB_DIR}.prof"
-	debug "converting ${PROF_OUTPUT} in the background"
-	nohup "${SCRIPT_DIR}/perfdata-mkprof" "${PERFDATA_JOB_DIR}" \
-		--binary "${EXE_PATH}" --output "/dev/null" >&"${PROF_OUTPUT}.log" &
-fi
