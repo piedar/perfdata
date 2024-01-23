@@ -1,0 +1,247 @@
+From fc07aa39ac4850953ab283a21dfa860dfde2b006 Mon Sep 17 00:00:00 2001
+From: Benn Snyder <benn.snyder@gmail.com>
+Date: Thu, 18 Jan 2024 15:08:43 -0500
+Subject: [PATCH 2/2] [llvm-profgen] Accept stdin or a named fifo pipe as
+ perfscript input
+
+---
+ llvm/tools/llvm-profgen/PerfReader.cpp | 24 +++++----
+ llvm/tools/llvm-profgen/PerfReader.h   | 70 ++++++++++++++++++++------
+ 2 files changed, 69 insertions(+), 25 deletions(-)
+
+diff --git a/llvm/tools/llvm-profgen/PerfReader.cpp b/llvm/tools/llvm-profgen/PerfReader.cpp
+index 313d40483a25..9a30f2444dc2 100644
+--- a/llvm/tools/llvm-profgen/PerfReader.cpp
++++ b/llvm/tools/llvm-profgen/PerfReader.cpp
+@@ -320,11 +320,14 @@ bool VirtualUnwinder::unwind(const PerfSample *Sample, uint64_t Repeat) {
+ std::unique_ptr<PerfReaderBase>
+ PerfReaderBase::create(ProfiledBinary *Binary, PerfInputFile &PerfInput,
+                        std::optional<uint32_t> PIDFilter) {
++  
++  TraceStream TraceIt(PerfInput.InputFile);
++
+   std::unique_ptr<PerfReaderBase> PerfReader;
+ 
+   if (PerfInput.Format == PerfFormat::UnsymbolizedProfile) {
+     PerfReader.reset(
+-        new UnsymbolizedProfileReader(Binary, PerfInput.InputFile));
++        new UnsymbolizedProfileReader(Binary, std::move(TraceIt)));
+     return PerfReader;
+   }
+ 
+@@ -337,12 +340,12 @@ PerfReaderBase::create(ProfiledBinary *Binary, PerfInputFile &PerfInput,
+          "Should be a perfscript!");
+ 
+   PerfInput.Content =
+-      PerfScriptReader::checkPerfScriptType(PerfInput.InputFile);
++      PerfScriptReader::checkPerfScriptType(TraceIt);
+   if (PerfInput.Content == PerfContent::LBRStack) {
+     PerfReader.reset(
+-        new HybridPerfReader(Binary, PerfInput.InputFile, PIDFilter));
++        new HybridPerfReader(Binary, std::move(TraceIt), PIDFilter));
+   } else if (PerfInput.Content == PerfContent::LBR) {
+-    PerfReader.reset(new LBRPerfReader(Binary, PerfInput.InputFile, PIDFilter));
++    PerfReader.reset(new LBRPerfReader(Binary, std::move(TraceIt), PIDFilter));
+   } else {
+     exitWithError("Unsupported perfscript!");
+   }
+@@ -839,8 +842,7 @@ void UnsymbolizedProfileReader::readSampleCounters(TraceStream &TraceIt,
+   ReadCounter(SCounters.BranchCounter, "->");
+ }
+ 
+-void UnsymbolizedProfileReader::readUnsymbolizedProfile(StringRef FileName) {
+-  TraceStream TraceIt(FileName);
++void UnsymbolizedProfileReader::readUnsymbolizedProfile(TraceStream &TraceIt) {
+   while (!TraceIt.isAtEoF()) {
+     std::shared_ptr<StringBasedCtxKey> Key =
+         std::make_shared<StringBasedCtxKey>();
+@@ -859,7 +861,8 @@ void UnsymbolizedProfileReader::readUnsymbolizedProfile(StringRef FileName) {
+ }
+ 
+ void UnsymbolizedProfileReader::parsePerfTraces() {
+-  readUnsymbolizedProfile(PerfTraceFile);
++  TraceIt.rewind();
++  readUnsymbolizedProfile(TraceIt);
+ }
+ 
+ void PerfScriptReader::computeCounterFromLBR(const PerfSample *Sample,
+@@ -989,8 +992,7 @@ void PerfScriptReader::parseEventOrSample(TraceStream &TraceIt) {
+ }
+ 
+ void PerfScriptReader::parseAndAggregateTrace() {
+-  // Trace line iterator
+-  TraceStream TraceIt(PerfTraceFile);
++  TraceIt.rewind();
+   while (!TraceIt.isAtEoF())
+     parseEventOrSample(TraceIt);
+ }
+@@ -1033,8 +1035,8 @@ bool PerfScriptReader::isMMap2Event(StringRef Line) {
+ // Determine the perfscript contains hybrid samples(call stack + LBRs) by
+ // checking whether there is a non-empty call stack immediately followed by
+ // a LBR sample
+-PerfContent PerfScriptReader::checkPerfScriptType(StringRef FileName) {
+-  TraceStream TraceIt(FileName);
++PerfContent PerfScriptReader::checkPerfScriptType(TraceStream &TraceIt) {
++  TraceIt.rewind();
+   uint64_t FrameAddr = 0;
+   while (!TraceIt.isAtEoF()) {
+     // Skip the aggregated count
+diff --git a/llvm/tools/llvm-profgen/PerfReader.h b/llvm/tools/llvm-profgen/PerfReader.h
+index e9f619350bf9..8ffe6274bfc0 100644
+--- a/llvm/tools/llvm-profgen/PerfReader.h
++++ b/llvm/tools/llvm-profgen/PerfReader.h
+@@ -30,11 +30,29 @@ class TraceStream {
+   bool IsAtEoF = false;
+   uint64_t LineNumber = 0;
+ 
++  bool CanRewindStream = false;
++  std::vector<std::string> RewindBuffer;
++  // We need only a few lines to determine file type.
++  bool rewindBufferExceeded() { return LineNumber >= 100; }
++
+ public:
+   TraceStream(StringRef Filename) : Fin(Filename.str()) {
+     if (!Fin.good())
+       exitWithError("Error read input perf script file", Filename);
+     advance();
++
++    Fin.seekg(0, Fin.beg);
++    if (Fin.good()) {
++      // This is a seekable file which can be rewound further in the future.
++      // Read the first line again to get back to the starting position.
++      std::getline(Fin, CurrentLine);
++      CanRewindStream = true;
++    } else {
++      // This is a pipe or stream which cannot be rewound.
++      // We'll keep a few lines in a buffer so that we can rewind a little bit.
++      Fin.clear();
++      CanRewindStream = false;
++    }
+   }
+ 
+   StringRef getCurrentLine() {
+@@ -48,12 +66,35 @@ public:
+ 
+   // Read the next line
+   void advance() {
+-    if (!std::getline(Fin, CurrentLine)) {
++    if (LineNumber < RewindBuffer.size()) {
++      CurrentLine = RewindBuffer.at(LineNumber);
++    } else if (!std::getline(Fin, CurrentLine)) {
+       IsAtEoF = true;
+       return;
++    } else {
++      if (!CanRewindStream) {
++        if (rewindBufferExceeded())
++          RewindBuffer.clear();
++        else
++          RewindBuffer.push_back(CurrentLine);
++      }
+     }
+     LineNumber++;
+   }
++
++  void rewind() {
++    if (CanRewindStream) {
++      Fin.seekg(0, Fin.beg);
++      if (Fin.bad())
++        exitWithError("File failed to rewind");
++    } else {
++      if (rewindBufferExceeded())
++        exitWithError("File read too far for rewind");
++    }
++    CurrentLine = "";
++    LineNumber = 0;
++    advance();
++  }
+ };
+ 
+ // The type of input format.
+@@ -559,10 +600,11 @@ private:
+ // Read perf trace to parse the events and samples.
+ class PerfReaderBase {
+ public:
+-  PerfReaderBase(ProfiledBinary *B, StringRef PerfTrace)
+-      : Binary(B), PerfTraceFile(PerfTrace) {
++  PerfReaderBase(ProfiledBinary *B, TraceStream &&Trace)
++      : Binary(B), TraceIt(std::move(Trace)) {
+     // Initialize the base address to preferred address.
+     Binary->setBaseAddress(Binary->getPreferredBaseAddress());
++    TraceIt.rewind(); // start from beginning
+   };
+   virtual ~PerfReaderBase() = default;
+   static std::unique_ptr<PerfReaderBase>
+@@ -578,7 +620,7 @@ public:
+ 
+ protected:
+   ProfiledBinary *Binary = nullptr;
+-  StringRef PerfTraceFile;
++  TraceStream TraceIt;
+ 
+   ContextSampleCounterMap SampleCounters;
+   bool ProfileIsCS = false;
+@@ -591,9 +633,9 @@ protected:
+ // Read perf script to parse the events and samples.
+ class PerfScriptReader : public PerfReaderBase {
+ public:
+-  PerfScriptReader(ProfiledBinary *B, StringRef PerfTrace,
++  PerfScriptReader(ProfiledBinary *B, TraceStream &&TraceIt,
+                    std::optional<uint32_t> PID)
+-      : PerfReaderBase(B, PerfTrace), PIDFilter(PID){};
++      : PerfReaderBase(B, std::move(TraceIt)), PIDFilter(PID){};
+ 
+   // Entry of the reader to parse multiple perf traces
+   void parsePerfTraces() override;
+@@ -602,7 +644,7 @@ public:
+   convertPerfDataToTrace(ProfiledBinary *Binary, PerfInputFile &File,
+                          std::optional<uint32_t> PIDFilter);
+   // Extract perf script type by peaking at the input
+-  static PerfContent checkPerfScriptType(StringRef FileName);
++  static PerfContent checkPerfScriptType(TraceStream &TraceIt);
+ 
+ protected:
+   // The parsed MMap event
+@@ -672,9 +714,9 @@ protected:
+ */
+ class LBRPerfReader : public PerfScriptReader {
+ public:
+-  LBRPerfReader(ProfiledBinary *Binary, StringRef PerfTrace,
++  LBRPerfReader(ProfiledBinary *Binary, TraceStream &&TraceIt,
+                 std::optional<uint32_t> PID)
+-      : PerfScriptReader(Binary, PerfTrace, PID){};
++      : PerfScriptReader(Binary, std::move(TraceIt), PID){};
+   // Parse the LBR only sample.
+   void parseSample(TraceStream &TraceIt, uint64_t Count) override;
+ };
+@@ -690,9 +732,9 @@ public:
+ */
+ class HybridPerfReader : public PerfScriptReader {
+ public:
+-  HybridPerfReader(ProfiledBinary *Binary, StringRef PerfTrace,
++  HybridPerfReader(ProfiledBinary *Binary, TraceStream &&TraceIt,
+                    std::optional<uint32_t> PID)
+-      : PerfScriptReader(Binary, PerfTrace, PID){};
++      : PerfScriptReader(Binary, std::move(TraceIt), PID){};
+   // Parse the hybrid sample including the call and LBR line
+   void parseSample(TraceStream &TraceIt, uint64_t Count) override;
+   void generateUnsymbolizedProfile() override;
+@@ -723,13 +765,13 @@ Note that non-CS profile doesn't have the empty `[]` context.
+ */
+ class UnsymbolizedProfileReader : public PerfReaderBase {
+ public:
+-  UnsymbolizedProfileReader(ProfiledBinary *Binary, StringRef PerfTrace)
+-      : PerfReaderBase(Binary, PerfTrace){};
++  UnsymbolizedProfileReader(ProfiledBinary *Binary, TraceStream &&TraceIt)
++      : PerfReaderBase(Binary, std::move(TraceIt)){};
+   void parsePerfTraces() override;
+ 
+ private:
+   void readSampleCounters(TraceStream &TraceIt, SampleCounter &SCounters);
+-  void readUnsymbolizedProfile(StringRef Filename);
++  void readUnsymbolizedProfile(TraceStream &TraceIt);
+ 
+   std::unordered_set<std::string> ContextStrSet;
+ };
+-- 
+2.43.0
+

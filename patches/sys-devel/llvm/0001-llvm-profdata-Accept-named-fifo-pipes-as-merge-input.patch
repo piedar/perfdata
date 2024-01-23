@@ -1,0 +1,27 @@
+From fa02c1a6442c072fb8c0d846cb225b4a5936cb31 Mon Sep 17 00:00:00 2001
+From: Benn Snyder <benn.snyder@gmail.com>
+Date: Thu, 18 Jan 2024 13:55:28 -0500
+Subject: [PATCH 1/2] [llvm-profdata] Accept named fifo pipes as merge input
+
+---
+ llvm/tools/llvm-profdata/llvm-profdata.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/llvm/tools/llvm-profdata/llvm-profdata.cpp b/llvm/tools/llvm-profdata/llvm-profdata.cpp
+index e6dc81ba1f5b..bb6dc4c59c11 100644
+--- a/llvm/tools/llvm-profdata/llvm-profdata.cpp
++++ b/llvm/tools/llvm-profdata/llvm-profdata.cpp
+@@ -1503,8 +1503,8 @@ static void addWeightedInput(WeightedFileVector &WNI, const WeightedFile &WF) {
+   if (!llvm::sys::fs::exists(Status))
+     exitWithErrorCode(make_error_code(errc::no_such_file_or_directory),
+                       Filename);
+-  // If it's a source file, collect it.
+-  if (llvm::sys::fs::is_regular_file(Status)) {
++  // If it's a source file or named pipe, collect it.
++  if (llvm::sys::fs::is_regular_file(Status) || Status.type() == llvm::sys::fs::file_type::fifo_file) {
+     WNI.push_back({std::string(Filename), Weight});
+     return;
+   }
+-- 
+2.43.0
+
