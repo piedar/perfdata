@@ -61,7 +61,7 @@ if "${PERFDATA_CONVERT_PROF:-false}"; then
 
 	stop_p2p() {
 		# perf-record is already dead so we need to close the pipe before waiting
-		debug "finishing perf2prof conversion..."
+		debug "finishing ${PROF_OUTPUT} with perf2prof..."
 		exec {p2p_fd}>&-
 		wait
 	}
