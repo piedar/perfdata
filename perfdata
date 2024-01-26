@@ -48,17 +48,19 @@ PERFDATA_JOB_DIR="${PERFDATA_PROFILE_DIR}/${PERFDATA_ID}.perfdata"
 
 # todo: does --event=br_inst_retired.all_branches gather enough data?
 # in this example - https://groups.google.com/g/llvm-dev/c/-Ao1uXCi8QM
-# they filter on --event=br_inst_retired.near_taken which is probably even less
+# they filter on --event=br_inst_retired.near_taken which doesn't produce anything useful for me
 
 # --call-graph=fp requires the source to be built with '-fno-omit-frame-pointer'
 # if llvm-profgen gains support in the future we could use '--call-graph=dwarf'
+
+# --freq=max gathers more events but adds significant cpu overhead when including call-graph
+# todo: maybe if perf-script and llvm-profgen were more optimized...
 
 PERF_RECORD_PARAMS=(
 	--branch-filter=any,u
 	--mmap-flush=128K
 	--call-graph=fp
 	--event=br_inst_retired.all_branches:uP
-	--freq=max
 )
 
 # the output of llvm-profgen is tiny by comparison
