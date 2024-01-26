@@ -1,14 +1,14 @@
-From 674361ded19c0f31c23181da8e6d18784f54493a Mon Sep 17 00:00:00 2001
+From 478f92a8cef74fdb18a55c34baa7731469aa05c9 Mon Sep 17 00:00:00 2001
 From: Benn Snyder <benn.snyder@gmail.com>
-Date: Thu, 25 Jan 2024 14:39:37 -0500
+Date: Fri, 26 Jan 2024 00:13:51 -0500
 Subject: [PATCH] feat(perf): accept named fifo pipes
 
 ---
- util/data.c | 112 ++++++++++++++++++++++++++++++----------------------
- 1 file changed, 65 insertions(+), 47 deletions(-)
+ util/data.c | 114 ++++++++++++++++++++++++++++++----------------------
+ 1 file changed, 67 insertions(+), 47 deletions(-)
 
 diff --git a/util/data.c b/util/data.c
-index fc16299..040f86f 100644
+index fc16299..e11e19f 100644
 --- a/util/data.c
 +++ b/util/data.c
 @@ -166,38 +166,26 @@ int perf_data__update_dir(struct perf_data *data)
@@ -129,7 +129,7 @@ index fc16299..040f86f 100644
  }
  
  static int open_file_dup(struct perf_data *data)
-@@ -350,17 +344,41 @@ static int open_dir(struct perf_data *data)
+@@ -350,17 +344,43 @@ static int open_dir(struct perf_data *data)
  	return ret;
  }
  
@@ -140,7 +140,9 @@ index fc16299..040f86f 100644
 +
 +	data->is_pipe = false;
 +
-+	if (0 == strcmp(data->path, "-") || (!data->path && fis_fifo(fd_stdio))) {
++	if ((data->path && 0 == strcmp(data->path, "-")) ||
++		(!data->path && fis_fifo(fd_stdio)))
++	{
 +		data->is_pipe = true;
 +		apply_io(data, fd_stdio, perf_data__is_read(data) ? "r" : "w");
 +		return true;
@@ -175,7 +177,7 @@ index fc16299..040f86f 100644
  	if (check_backup(data))
  		return -1;
  
-@@ -418,7 +436,7 @@ int perf_data__switch(struct perf_data *data,
+@@ -418,7 +438,7 @@ int perf_data__switch(struct perf_data *data,
  {
  	int ret;
  
