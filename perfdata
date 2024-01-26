@@ -21,6 +21,20 @@ function hashsum() {
 SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[@]})")")"
 
 
+PERFDATA_BINARY_ARGS=()
+
+# todo: accept arguments in the form --output=foo
+while [[ $# -gt 0 ]]; do
+	case $1 in
+		# todo
+		#-h|--help) print_help; exit 0 ;;
+		--binary) PERFDATA_BINARY_ARGS+=("--binary ${2}"); shift ;;
+		#--pid) PERFDATA_PID="${2}"; shift ;;
+		*) break ;; # everything else is the command
+	esac
+	shift
+done
+
 COMMAND="${1:?COMMAND not specified}"
 
 EXE_PATH="$(type -p "${COMMAND}" || true)"
@@ -28,6 +42,10 @@ if [ -z "${EXE_PATH}" ]; then
 	debug "COMMAND ${COMMAND} has no executable path (is it a shell builtin?)"
 	exec "${@}"
 fi
+
+# if --binary was not specified, use the exe by default
+[ ${#PERFDATA_BINARY_ARGS[@]} -eq 0 ] && PERFDATA_BINARY_ARGS+=("--binary ${EXE_PATH}")
+
 
 umask 0027
 
@@ -72,7 +90,7 @@ if "${PERFDATA_CONVERT_PROF:-false}"; then
 	exec {p2p_fd}> >(
 		set -m # use separate process group so this part doesn't get interrupted
 		{
-			"${SCRIPT_DIR}/perf2prof" '-' --binary "${EXE_PATH}" --output "${PROF_OUTPUT_PART}" &&
+			"${SCRIPT_DIR}/perf2prof" '-' ${PERFDATA_BINARY_ARGS[@]} --output "${PROF_OUTPUT_PART}" &&
 				mv --no-target-directory "${PROF_OUTPUT_PART}" "${PROF_OUTPUT}"
 		} || cat >/dev/null # perf2prof failed - ignore remaining input
 	)

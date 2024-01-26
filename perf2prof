@@ -26,13 +26,14 @@ EOF
 }
 
 PERFDATA_INPUTS=()
-PERFDATA_BINARIES=()
+PERFDATA_BINARY_ARGS=()
 
 # todo: accept arguments in the form --output=foo
 while [[ $# -gt 0 ]]; do
 	case $1 in
 		-h|--help) print_help; exit 0 ;;
-		--binary) PERFDATA_BINARIES+=("${2}"); shift ;;
+		# llvm-profgen does not follow --binary symlinks - todo: fix upstream
+		--binary) PERFDATA_BINARY_ARGS+=(--binary "$(realpath "${2}")"); shift ;;
 		-o|--output) PROF_OUTPUT="${2}"; shift ;;
 		--pid) PERFDATA_PID="${2}"; shift ;;
 		*) PERFDATA_INPUTS+=("${1}") ;;
@@ -42,9 +43,8 @@ done
 
 : "${PROF_OUTPUT:=default.prof}"
 : "${PERFDATA_INPUTS:?}"
-: "${PERFDATA_BINARIES:?}"
+: "${PERFDATA_BINARY_ARGS:?}"
 
-BINARY_PARAMETERS="$(printf -- '--binary=%s ' ${PERFDATA_BINARIES[@]:?})"
 [ -n "${PERFDATA_PID}" ] && PID_PARAMETERS="$(printf -- '--pid=%s ' ${PERFDATA_PID})"
 
 _perf-script() {
@@ -64,7 +64,7 @@ if ${PERFDATA_HAS_PIPING_PROF}; then
 		[ -d "${PERFDATA}" ] && ALL_FILES=("${PERFDATA}"/*) || ALL_FILES=("${PERFDATA}")
 
 		exec {prof_fd}< <( for F in "${ALL_FILES[@]}"; do _perf-script -i "${F}"; done |
-			llvm-profgen --perfscript=/dev/stdin ${BINARY_PARAMETERS} --format=text --output=-)
+			llvm-profgen --perfscript=/dev/stdin ${PERFDATA_BINARY_ARGS[@]} --format=text --output=-)
 		PROFGEN_FILES+=("/dev/fd/${prof_fd}")
 	done
 
@@ -101,7 +101,7 @@ for PERFDATA in "${PERFDATA_INPUTS[@]}"; do
 	done
 
 	profdata="$(mktemp --dry-run --suffix='.prof' --tmpdir="${PERFDATA_TMPDIR}")"
-	llvm-profgen --perfscript="${perfscript}" ${BINARY_PARAMETERS} --output="${profdata}"
+	llvm-profgen --perfscript="${perfscript}" ${PERFDATA_BINARY_ARGS[@]} --output="${profdata}"
 
 	PROFGEN_FILES+=( "${profdata}" )
 done
