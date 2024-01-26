@@ -22,6 +22,7 @@ And indeed it is true that `perf record` with properly tuned `--mmap-flush=` add
 
 But `perf record --branch-filter 'any,u'` makes massive dumps of data - about 10 GiB per hour or even more with `--freq=max`.
 Compression can save space, but of course this adds more CPU overhead.
+Even better, we can use an event filter like `--event=br_inst_retired.all_branches` to reduce the amount of data being gathered and processed.
 
 Once the raw data is recorded it has to be summarized in a format a compiler can understand.
 
@@ -30,7 +31,4 @@ Once the raw data is recorded it has to be summarized in a format a compiler can
 - `llvm-profdata` combines multiple profiles
 
 I made [some patches](./patches/) to `perf`, `llvm-profdata`, and `llvm-profgen` which allow them to pipe data around, avoiding intermediate temporary files completely.
-This solves the storage problem, but `perf script` and `llvm-profgen` are not cheap!
-Together they add about 25% overhead to a CPU-bound job.
-
-
+Together with `perf-record` event filtering, this brings CPU overhead down below 5% and the IO overhead down to just a few MB per hour, even when recording with `--freq=max`.

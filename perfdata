@@ -46,6 +46,18 @@ PERFDATA_JOB_DIR="${PERFDATA_PROFILE_DIR}/${PERFDATA_ID}.perfdata"
 # todo: re-enable cleanup
 #PERFDATA_PROFILE_DIR="${PERFDATA_PROFILE_DIR}" "${SCRIPT_DIR}/perfdata-cleanup"
 
+# todo: does --event=br_inst_retired.all_branches gather enough data?
+# in this example - https://groups.google.com/g/llvm-dev/c/-Ao1uXCi8QM
+# they filter on --event=br_inst_retired.near_taken which is probably even less
+
+PERF_RECORD_PARAMS=(
+	--branch-filter=any,u
+	--mmap-flush=128K
+	--call-graph=fp
+	--event=br_inst_retired.all_branches:uP
+	--freq=max
+)
+
 # the output of llvm-profgen is tiny by comparison
 # do the conversion now if so configured
 if "${PERFDATA_CONVERT_PROF:-false}"; then
@@ -74,10 +86,10 @@ if "${PERFDATA_CONVERT_PROF:-false}"; then
 		PERDATA_HAS_PIPING_PERF=false || PERDATA_HAS_PIPING_PERF=true
 
 	if "${PERDATA_HAS_PIPING_PERF}"; then
-		perf record --branch-filter 'any,u' --mmap-flush=128K \
+		perf record ${PERF_RECORD_PARAMS[@]} \
 			--output="/dev/fd/${p2p_fd}" -- "${@}"
 	else
-		perf record --branch-filter 'any,u' --mmap-flush=128K \
+		perf record --branch-filter ${PERF_RECORD_PARAMS[@]} \
 			--output='-' -- "${@}" >"/dev/fd/${p2p_fd}"
 	fi
 
@@ -94,7 +106,7 @@ mkdir -p "${PERFDATA_JOB_DIR}"
 # todo: might rely on EXE_CACHE instead of buildid
 
 flock --exclusive --timeout 10 --no-fork "${PERFDATA_JOB_DIR}" \
-	perf record --branch-filter 'any,u' --mmap-flush=128K \
+	perf record ${PERF_RECORD_PARAMS[@]} \
 	--switch-output=1G --no-no-buildid \
 	--output "${PERFDATA_JOB_DIR}/perfdata" -- "${@}"
 
