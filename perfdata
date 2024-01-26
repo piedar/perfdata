@@ -50,6 +50,9 @@ PERFDATA_JOB_DIR="${PERFDATA_PROFILE_DIR}/${PERFDATA_ID}.perfdata"
 # in this example - https://groups.google.com/g/llvm-dev/c/-Ao1uXCi8QM
 # they filter on --event=br_inst_retired.near_taken which is probably even less
 
+# --call-graph=fp requires the source to be built with '-fno-omit-frame-pointer'
+# if llvm-profgen gains support in the future we could use '--call-graph=dwarf'
+
 PERF_RECORD_PARAMS=(
 	--branch-filter=any,u
 	--mmap-flush=128K
