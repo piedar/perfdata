@@ -75,14 +75,6 @@ if "${PERFDATA_CONVERT_PROF:-false}"; then
 		} || cat >/dev/null # perf2prof failed - ignore remaining input
 	)
 
-	stop_p2p() {
-		# perf-record is already dead so we need to close the pipe before waiting
-		debug "finishing ${PROF_OUTPUT} with perf2prof..."
-		exec {p2p_fd}>&-
-		wait
-	}
-	trap stop_p2p SIGINT
-
 	# perf can pipe to stdout, but then the command's stdout gets sent to stderr
 	# my patched perf can write to a named fifo pipe, keeping the command's pipes intact
 	[[ "$(perf record --branch-filter 'any,u' -o >(cat > /dev/null) echo 2>&1)" == *"failed to mmap file"* ]] &&
@@ -90,13 +82,25 @@ if "${PERFDATA_CONVERT_PROF:-false}"; then
 
 	if "${PERDATA_HAS_PIPING_PERF}"; then
 		perf record ${PERF_RECORD_PARAMS[@]} \
-			--output="/dev/fd/${p2p_fd}" -- "${@}"
+			--output="/dev/fd/${p2p_fd}" -- "${@}" &
 	else
 		perf record --branch-filter ${PERF_RECORD_PARAMS[@]} \
-			--output='-' -- "${@}" >"/dev/fd/${p2p_fd}"
+			--output='-' -- "${@}" >"/dev/fd/${p2p_fd}" &
 	fi
+	mainpid=$!
 
-	stop_p2p
+	shutdown_main() {
+		debug 'shutting down on signal'
+		kill -SIGINT ${mainpid}
+	}
+
+	trap shutdown_main SIGINT SIGTERM SIGQUIT
+	wait ${mainpid} || debug "${mainpid} ended early - $?"
+
+	# perf-record is already dead so we need to close the pipe before waiting
+	debug "finishing ${PROF_OUTPUT} with perf2prof..."
+	exec {p2p_fd}>&-
+	wait
 	exit 0
 fi
 
