@@ -1,22 +1,22 @@
-From a5f0cb46827424fc3e1346de5fd2258e26335cb6 Mon Sep 17 00:00:00 2001
+From 674361ded19c0f31c23181da8e6d18784f54493a Mon Sep 17 00:00:00 2001
 From: Benn Snyder <benn.snyder@gmail.com>
-Date: Sun, 21 Jan 2024 22:54:53 -0500
+Date: Thu, 25 Jan 2024 14:39:37 -0500
 Subject: [PATCH] feat(perf): accept named fifo pipes
 
 ---
- util/data.c | 115 ++++++++++++++++++++++++-----------------
- 1 file changed, 67 insertions(+), 48 deletions(-)
+ util/data.c | 112 ++++++++++++++++++++++++++++++----------------------
+ 1 file changed, 65 insertions(+), 47 deletions(-)
 
-diff --git a/util/data.c b/tools/perf/util/data.c
-index fc16299..290070d 100644
+diff --git a/util/data.c b/util/data.c
+index fc16299..040f86f 100644
 --- a/util/data.c
 +++ b/util/data.c
-@@ -166,38 +166,21 @@ int perf_data__update_dir(struct perf_data *data)
+@@ -166,38 +166,26 @@ int perf_data__update_dir(struct perf_data *data)
  	return 0;
  }
  
 -static bool check_pipe(struct perf_data *data)
-+static bool is_fifo(int fd)
++static bool fis_fifo(int fd)
  {
  	struct stat st;
 -	bool is_pipe = false;
@@ -34,10 +34,14 @@ index fc16299..290070d 100644
 -	if (is_pipe) {
 -		if (data->use_stdio) {
 -			const char *mode;
--
++	return 0 == fstat(fd, &st) && S_ISFIFO(st.st_mode);
++}
+ 
 -			mode = perf_data__is_read(data) ? "r" : "w";
 -			data->file.fptr = fdopen(fd, mode);
-+	return 0 == fstat(fd, &st) && S_ISFIFO(st.st_mode);
++static bool is_fifo(const char *restrict path) {
++	struct stat st;
++	return 0 == stat(path, &st) && S_ISFIFO(st.st_mode);
 +}
  
 -			if (data->file.fptr == NULL) {
@@ -60,7 +64,7 @@ index fc16299..290070d 100644
  }
  
  static int check_backup(struct perf_data *data)
-@@ -272,14 +255,18 @@ static int open_file_read(struct perf_data *data)
+@@ -272,14 +260,18 @@ static int open_file_read(struct perf_data *data)
  		goto out_close;
  	}
  
@@ -85,7 +89,7 @@ index fc16299..290070d 100644
  
   out_close:
  	close(fd);
-@@ -294,27 +281,29 @@ static int open_file_write(struct perf_data *data)
+@@ -294,27 +286,29 @@ static int open_file_write(struct perf_data *data)
  	fd = open(data->file.path, O_CREAT|O_RDWR|O_TRUNC|O_CLOEXEC,
  		  S_IRUSR|S_IWUSR);
  
@@ -97,11 +101,11 @@ index fc16299..290070d 100644
 +			str_error_r(err, sbuf, sizeof(sbuf)));
 +		return -err;
 +	}
++
++	data->is_pipe = fis_fifo(fd);
++	apply_io(data, fd, "w");
  
 -	return fd;
-+	data->is_pipe = is_fifo(fd);
-+	apply_io(data, fd, "w");
-+
 +	return 0;
  }
  
@@ -125,7 +129,7 @@ index fc16299..290070d 100644
  }
  
  static int open_file_dup(struct perf_data *data)
-@@ -350,17 +339,47 @@ static int open_dir(struct perf_data *data)
+@@ -350,17 +344,41 @@ static int open_dir(struct perf_data *data)
  	return ret;
  }
  
@@ -136,25 +140,19 @@ index fc16299..290070d 100644
 +
 +	data->is_pipe = false;
 +
-+	if (0 == strcmp(data->path, "-") || (!data->path && is_fifo(fd_stdio))) {
++	if (0 == strcmp(data->path, "-") || (!data->path && fis_fifo(fd_stdio))) {
 +		data->is_pipe = true;
 +		apply_io(data, fd_stdio, perf_data__is_read(data) ? "r" : "w");
 +		return true;
 +	}
-+	
++
 +	if (!data->path)
 +		data->path = path_default;
 +
 +	if (data->path) {
-+		int ret = open_file_dup(data);
-+		if (ret < 0) {
-+			fprintf(stderr, "failed to open possible pipe %i \n", ret);
-+			return false;
-+		}
-+		if (!data->is_pipe) {
-+			// not a pipe - reopen later after backup and directory checks
-+			perf_data__close(data);
-+			return false;
++		if ((data->is_pipe = is_fifo(data->path))) {
++			int ret = open_file_dup(data);
++			if (ret < 0) return false; // error opening - already logged
 +		}
 +	}
 +
@@ -177,7 +175,7 @@ index fc16299..290070d 100644
  	if (check_backup(data))
  		return -1;
  
-@@ -418,7 +437,7 @@ int perf_data__switch(struct perf_data *data,
+@@ -418,7 +436,7 @@ int perf_data__switch(struct perf_data *data,
  {
  	int ret;
  
