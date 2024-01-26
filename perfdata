@@ -37,6 +37,7 @@ if [ -z "${PERFDATA_PROFILE_DIR}" ]; then
 	: "${PERFDATA_PROFILE:=${EXE_NAME}}"
 	PERFDATA_PROFILE_DIR="${PERFDATA_DIR}/${PERFDATA_PROFILE}"
 fi
+mkdir -p "${PERFDATA_PROFILE_DIR}"
 
 : "${PERFDATA_STAMP:=$(hashsum "${EXE_PATH}")}"
 PERFDATA_ID="${PERFDATA_STAMP}-$(date --utc +'%s')-$$"
