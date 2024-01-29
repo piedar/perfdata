@@ -50,72 +50,47 @@ PERF_RECORD_PARAMS = [
 
 perf_exe = shutil.which('perf')
 
-def collect_prof(command, output_path, binaries):
+def collect_prof(command, output_path, command_exe, binaries):
 	PROF_OUTPUT = f"{output_path}.prof"
 	PROF_OUTPUT_PART = f"{PROF_OUTPUT}.part"
 	os.makedirs(os.path.dirname(PROF_OUTPUT), exist_ok=True)
 
-	perf2prof = os.path.join(SCRIPT_DIR, 'perf2prof')
+	perf2prof_exe = os.path.join(SCRIPT_DIR, 'perf2prof')
 
-	# perf can pipe to stdout, but then the command's stdout gets sent to stderr
-	# my patched perf can write to a named fifo pipe, keeping the command's pipes intact
-	has_piping_perf = 'failed to mmap file' not in sub.run([ perf_exe, PERF_BRANCH_FILTER, '-o', '/dev/stderr' ], stderr=sub.PIPE, text=True).stderr
+	# this is the main user process - it gets priority on stdin and stdout
+	command_proc = sub.Popen([ command_exe, *command[1:] ], stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
+	try:
+		def handler(signum, frame):
+			signame = signal.strsignal(signum)
+			debug(f"shutting down on {signame}")
+			command_proc.terminate()
+			# now perf-record finishes and closes pipe, then perf2prof finishes
 
-	if has_piping_perf:
-		from contextlib import contextmanager
-		@contextmanager
-		def TemporaryNamedPipe(name='fifo'):
-			"""Context Manager for creating a temporary named pipe (aka fifo)."""
-			"""The pipe can still be used anonymously if open() before the context closes."""
-			import tempfile
-			tmpdir = tempfile.mkdtemp()
-			try:
-				filename = os.path.join(tmpdir, name)
-				os.mkfifo(filename)
-				try:
-					yield filename
-				finally:
-					os.unlink(filename)
-			finally:
-				os.rmdir(tmpdir)
+		signal.signal(signal.SIGINT, handler)
+		signal.signal(signal.SIGTERM, handler)
+		signal.signal(signal.SIGQUIT, handler)
 
+		# perf output pipes straight to perf2prof
+		perf_proc = sub.Popen([ perf_exe, 'record', *PERF_RECORD_PARAMS, '--output=-', f"--pid={command_proc.pid}" ], stdout=sub.PIPE, stderr=sys.stderr)
+		try:
+			binary_args = [b for b in binaries for b in ['--binary', b]]
+			perf2prof_proc = sub.Popen([ perf2prof_exe, '-', *binary_args, '--output', PROF_OUTPUT_PART ],
+				preexec_fn=os.setpgrp,
+				#start_new_session=True,
+				stdin=perf_proc.stdout, stdout=sys.stderr, stderr=sys.stderr)
+			perf_proc.stdout.close() # perf2prof now owns this pipe - perf should get SIGPIPE if it closes early
 
-		with TemporaryNamedPipe('perfdata.fifo') as perfdata_fifo:
-			producer = sub.Popen([ perf_exe, 'record', *PERF_RECORD_PARAMS, '--output', perfdata_fifo, '--', *command ], stdout=sys.stdout, stderr=sys.stderr)
-			producer_output = open(perfdata_fifo, 'rb')
-			# the pipe is now open, so deleting its file makes it anonymous
-	else:
-		producer = sub.Popen([ perf_exe, 'record', *PERF_RECORD_PARAMS, '--output=-', '--', *command ], stdout=sub.PIPE, stderr=sys.stderr)
-		producer_output = producer.stdout
-
-	binary_args = [b for b in binaries for b in ['--binary', b]]
-	consumer = sub.Popen([ perf2prof, '-', *binary_args, '--output', PROF_OUTPUT_PART ],
-		preexec_fn=os.setpgrp,
-		#start_new_session=True,
-		stdin=producer_output, stdout=sys.stderr, stderr=sys.stderr)
-
-	def handler(signum, frame):
-		signame = signal.strsignal(signum)
-		debug(f"shutting down on {signame}")
-		producer.terminate()
-
-	signal.signal(signal.SIGINT, handler)
-	signal.signal(signal.SIGTERM, handler)
-	signal.signal(signal.SIGQUIT, handler)
-
-	consumer.communicate()
-	if consumer.returncode == 0:
-		os.rename(PROF_OUTPUT_PART, PROF_OUTPUT)
-		debug(f"finished {PROF_OUTPUT}")
-	else:
-		# todo: could use `perf record --control=fifo:` to stop recording here
-		debug('consumer failed - draining output and continuing')
-		def drain(f):
-			while f.read(128 * 1024):
-				pass
-		drain(producer_output)
-
-	producer.wait()
+			perf2prof_proc.communicate()
+			if perf2prof_proc.returncode == 0:
+				os.rename(PROF_OUTPUT_PART, PROF_OUTPUT)
+				debug(f"finished {PROF_OUTPUT}")
+			else:
+				debug('perf2prof failed - stop recording')
+				perf_proc.terminate()
+		finally:
+			perf_proc.wait()
+	finally:
+		command_proc.wait()
 
 def collect_perfdata(command, output_path):
 	os.makedirs(output_path, exist_ok=True)
@@ -164,7 +139,7 @@ def main_collect(args):
 	if args.format == 'perfdata':
 		collect_perfdata(command, output_path)
 	else:
-		collect_prof(command, output_path, args.binary or [exe_path])
+		collect_prof(command, output_path, exe_path, args.binary or [exe_path])
 
 
 def cli_collect(cli):
