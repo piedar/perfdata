@@ -132,7 +132,7 @@ def main_collect(args):
 	import time
 
 	PERFDATA_STAMP = os.environ.get('PERFDATA_STAMP') or stamp_default()
-	PERFDATA_ID = f"{PERFDATA_STAMP}-{time.time()}-{os.getpid()}"
+	PERFDATA_ID = f"{PERFDATA_STAMP}-{round(time.time())}-{os.getpid()}"
 	profile_dir = get_profile_dir(os.path.basename(os.path.realpath(exe_path)))
 	output_path = f"{os.path.join(profile_dir, PERFDATA_ID)}.perfdata"
 
