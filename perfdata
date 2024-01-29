@@ -110,7 +110,7 @@ def collect_perfdata(command, output_path):
 		flock_exe, '--exclusive', '--timeout', '10', '--no-fork', output_path,
 		perf_exe, 'record', *PERF_RECORD_PARAMS,
 		'--switch-output=1G', '--no-no-buildid',
-		'--output={output_path}/perfdata', '--', *command ], stdout=sys.stdout, stderr=sys.stderr)
+		f"--output={output_path}/perfdata", '--', *command ], stdout=sys.stdout, stderr=sys.stderr)
 	# todo: necessary?
 	#chmod -R ug+rX "${output_path}"
 	#os.chmod()
