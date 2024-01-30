@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 import os
+from pathlib import Path
 import shutil
 import signal
 import subprocess as sub
@@ -50,15 +51,54 @@ PERF_RECORD_PARAMS = [
 
 perf_exe = shutil.which('perf')
 
-def collect_prof(command, output_path, command_exe, binaries):
+
+def attach_prof(pids, output_path, binaries):
 	PROF_OUTPUT = f"{output_path}.prof"
 	PROF_OUTPUT_PART = f"{PROF_OUTPUT}.part"
 	os.makedirs(os.path.dirname(PROF_OUTPUT), exist_ok=True)
 
 	perf2prof_exe = os.path.join(SCRIPT_DIR, 'perf2prof')
 
+	# perf output pipes straight to perf2prof
+	pid_arg = f"--pid={str.join(',', [str(pid) for pid in pids])}"
+	perf_proc = sub.Popen([ perf_exe, 'record', *PERF_RECORD_PARAMS, '--output=-', pid_arg ],
+		stdout=sub.PIPE, stderr=sys.stderr,
+	)
+	try:
+		binary_args = [b for b in binaries for b in ['--binary', b]]
+		perf2prof_proc = sub.Popen([ perf2prof_exe, '-', *binary_args, '--output', PROF_OUTPUT_PART ],
+			# using another process group to prevent the shell sending SIGINT directly to the worker
+			preexec_fn=os.setpgrp,
+			# todo: python 3.11 has some interesting properties like
+			#start_new_session=True,
+			stdin=perf_proc.stdout, stdout=sys.stderr, stderr=sys.stderr,
+		)
+		perf_proc.stdout.close() # perf2prof now owns this pipe - perf should get SIGPIPE if it closes early
+
+		class AttachedProf:
+			def wait(self):
+				try:
+					perf2prof_proc.communicate()
+					if perf2prof_proc.returncode == 0:
+						os.rename(PROF_OUTPUT_PART, PROF_OUTPUT)
+						debug(f"finished {PROF_OUTPUT}")
+					else:
+						debug('perf2prof failed - stop recording')
+					return perf2prof_proc.returncode
+				finally:
+					perf_proc.terminate()
+		return AttachedProf()
+
+	except:
+		perf_proc.terminate()
+		raise
+
+
+def collect_prof(command, output_path, command_exe, binaries):
 	# this is the main user process - it gets priority on stdin and stdout
-	command_proc = sub.Popen([ command_exe, *command[1:] ], stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
+	command_proc = sub.Popen([ command_exe, *command[1:] ],
+		stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
+	)
 	try:
 		def handler(signum, frame):
 			signame = signal.strsignal(signum)
@@ -70,25 +110,8 @@ def collect_prof(command, output_path, command_exe, binaries):
 		signal.signal(signal.SIGTERM, handler)
 		signal.signal(signal.SIGQUIT, handler)
 
-		# perf output pipes straight to perf2prof
-		perf_proc = sub.Popen([ perf_exe, 'record', *PERF_RECORD_PARAMS, '--output=-', f"--pid={command_proc.pid}" ], stdout=sub.PIPE, stderr=sys.stderr)
-		try:
-			binary_args = [b for b in binaries for b in ['--binary', b]]
-			perf2prof_proc = sub.Popen([ perf2prof_exe, '-', *binary_args, '--output', PROF_OUTPUT_PART ],
-				preexec_fn=os.setpgrp,
-				#start_new_session=True,
-				stdin=perf_proc.stdout, stdout=sys.stderr, stderr=sys.stderr)
-			perf_proc.stdout.close() # perf2prof now owns this pipe - perf should get SIGPIPE if it closes early
-
-			perf2prof_proc.communicate()
-			if perf2prof_proc.returncode == 0:
-				os.rename(PROF_OUTPUT_PART, PROF_OUTPUT)
-				debug(f"finished {PROF_OUTPUT}")
-			else:
-				debug('perf2prof failed - stop recording')
-				perf_proc.terminate()
-		finally:
-			perf_proc.wait()
+		attached = attach_prof([command_proc.pid], output_path, binaries)
+		attached.wait()
 	finally:
 		command_proc.wait()
 
@@ -115,19 +138,17 @@ def collect_perfdata(command, output_path):
 	#chmod -R ug+rX "${output_path}"
 	#os.chmod()
 
-
-def main_collect(args):
+def setup_output_path(exe_path):
 	# todo: necessary?
 	os.umask(0o0027)
-	command = args.command[1:] if args.command[0] == '--' else args.command
-
-	exe_path = shutil.which(command[0]) or os.path.realpath(command[0])
-	os.path.isfile(exe_path) or _raise(Exception(f"{exe_path} not found (is it a shell builtin?)"))
 
 	def stamp_default():
 		import hashlib
-		with open(exe_path, 'rb') as f:
-			return hashlib.file_digest(f, 'sha256').hexdigest()
+		try:
+			with open(exe_path, 'rb') as f:
+				return hashlib.file_digest(f, 'sha256').hexdigest()
+		except FileNotFoundError:
+			return hashlib.sha256(exe_path.encode()).hexdigest()
 
 	import time
 
@@ -135,27 +156,86 @@ def main_collect(args):
 	PERFDATA_ID = f"{PERFDATA_STAMP}-{round(time.time())}-{os.getpid()}"
 	profile_dir = get_profile_dir(os.path.basename(os.path.realpath(exe_path)))
 	output_path = f"{os.path.join(profile_dir, PERFDATA_ID)}.perfdata"
+	return output_path
 
+
+def main_collect(args):
+	command = args.command[1:] if args.command[0] == '--' else args.command
+	exe_path = shutil.which(command[0]) or os.path.realpath(command[0])
+	os.path.isfile(exe_path) or _raise(Exception(f"{exe_path} not found (is it a shell builtin?)"))
+	output_path = setup_output_path(exe_path)
 	if args.format == 'perfdata':
 		collect_perfdata(command, output_path)
-	else:
+	elif args.format == 'prof':
 		collect_prof(command, output_path, exe_path, args.binary or [exe_path])
+	else:
+		raise Exception(f"unknown format {args.format}")
 
 
-def cli_collect(cli):
-	cli.add_argument('--format', choices=['perfdata', 'prof'],  default='perfdata')
-	cli.add_argument('--binary', action='append')
-	cli.add_argument('command', nargs=argparse.REMAINDER)
-	cli.set_defaults(func=main_collect)
+def get_matching_pids(exe_path, on_error=debug):
+	proc = Path('/proc')
+	pids = []
+	for p in proc.iterdir():
+		try:
+			if p.is_dir():
+				pexe = (p / 'exe').resolve()
+				if len(exe_path.parts) > 1 or exe_path.exists():
+					if pexe.exists() and exe_path.samefile(pexe):
+						pids.append(int(p.name))
+				else:
+					if exe_path.name == pexe.name:
+						pids.append(int(p.name))
+		except PermissionError as error:
+			on_error(error)
+	return pids
+
+def main_attach(args):
+	if args.pid:
+		exe_path = Path('/proc', str(args.pid), 'exe').resolve()
+		pids = [args.pid]
+	elif args.name:
+		exe_path = Path(args.name)
+		pids = get_matching_pids(exe_path)
+	else:
+		raise Exception('no --name or --pid specified')
+
+	output_path = setup_output_path(str(exe_path))
+
+	debug('pids', pids, output_path)
+
+	if args.format == 'perfdata':
+		raise Exception('todo: --format=perfdata not yet supported')
+	elif args.format == 'prof':
+		binaries = args.binary or ([str(exe_path)] if exe_path.exists() else _raise(Exception(f"{exe_path} not found")))
+		attach_prof(pids, output_path, binaries).wait()
+	else:
+		raise Exception(f"unknown format {args.format}")
+
 
 
 if __name__ == '__main__':
 	import argparse
 
 	cli = argparse.ArgumentParser(allow_abbrev=False)
-	cli.set_defaults(func=lambda args: cli.print_help())
 
-	cli_collect(cli)
+	cli.add_argument('--format', choices=['perfdata', 'prof'],  default='prof')
+	cli.add_argument('--binary', action='append')
+
+	attach_group = cli.add_argument_group('attach')
+	#attach_group.add_argument('--wait', action='store_true')
+	pgroup = attach_group.add_mutually_exclusive_group()
+	pgroup.add_argument('--pid', type=int)
+	pgroup.add_argument('--name')
+
+	cli.add_argument('command', nargs=argparse.REMAINDER)
 
 	args = cli.parse_args()
-	args.func(args)
+
+	if args.pid or args.name:
+		assert(not args.command)
+		main_attach(args)
+	elif args.command:
+		assert(not args.pid and not args.name)
+		main_collect(args)
+	else:
+		cli.print_help()
