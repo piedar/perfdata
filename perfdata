@@ -18,6 +18,9 @@ def _raise(ex): raise ex
 def is_truthy(val):
 	return val and val.casefold() == 'true'.casefold() or val == '1'
 
+def csv(values):
+	return str.join(',', (str(v) for v in values))
+
 def get_profile_dir_default(name):
 	XDG_CACHE_HOME = Path(os.environ.get('XDG_CACHE_HOME') or Path(os.environ['HOME']) / '.cache')
 	return XDG_CACHE_HOME / 'perfdata' / name
@@ -60,8 +63,10 @@ def attach_prof(pids, output_path, binaries):
 	perf2prof_exe = SCRIPT_DIR / 'perf2prof'
 
 	# perf output pipes straight to perf2prof
-	pid_arg = f"--pid={str.join(',', [str(pid) for pid in pids])}"
-	perf_proc = sub.Popen([ perf_exe, 'record', *PERF_RECORD_PARAMS, '--output=-', pid_arg ],
+	perf_proc = sub.Popen([
+			perf_exe, 'record', *PERF_RECORD_PARAMS, '--output=-',
+				'--pid', csv(pids),
+		],
 		stdout=sub.PIPE, stderr=sys.stderr,
 	)
 	try:
@@ -75,8 +80,8 @@ def attach_prof(pids, output_path, binaries):
 		)
 		perf_proc.stdout.close() # perf2prof now owns this pipe - perf should get SIGPIPE if it closes early
 
-		class AttachedProf:
-			def wait(self):
+		class Finisher:
+			def finish(self):
 				try:
 					perf2prof_proc.communicate()
 					if perf2prof_proc.returncode == 0:
@@ -84,17 +89,17 @@ def attach_prof(pids, output_path, binaries):
 						debug(f"finished {prof_output}")
 					else:
 						debug('perf2prof failed - stop recording')
-					return perf2prof_proc.returncode
+					return perf2prof_proc
 				finally:
 					perf_proc.terminate()
-		return AttachedProf()
+		return Finisher()
 
 	except:
 		perf_proc.terminate()
 		raise
 
 
-def collect_prof(command, output_path, exe_path, binaries):
+def start_command_proc(command, exe_path):
 	# this is the main user process - it gets priority on stdin and stdout
 	command_proc = sub.Popen([ str(exe_path), *command[1:] ],
 		stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
@@ -104,18 +109,15 @@ def collect_prof(command, output_path, exe_path, binaries):
 			signame = signal.strsignal(signum)
 			debug(f"shutting down on {signame}")
 			command_proc.terminate()
-			# now perf-record finishes and closes pipe, then perf2prof finishes
-
 		signal.signal(signal.SIGINT, handler)
 		signal.signal(signal.SIGTERM, handler)
 		signal.signal(signal.SIGQUIT, handler)
+		return command_proc
+	except:
+		command_proc.terminate()
+		raise
 
-		attached = attach_prof([command_proc.pid], output_path, binaries)
-		attached.wait()
-	finally:
-		command_proc.wait()
-
-def collect_perfdata(command, output_path):
+def attach_perfdata(pids, output_path):
 	output_path.mkdir(parents=True, exist_ok=True)
 
 	# compression uses extra cpu time - much more at higher levels
@@ -131,12 +133,22 @@ def collect_perfdata(command, output_path):
 
 	perf_proc = sub.Popen([
 		flock_exe, '--exclusive', '--timeout', '10', '--no-fork', str(output_path),
-		perf_exe, 'record', *PERF_RECORD_PARAMS,
-		'--switch-output=1G', '--no-no-buildid',
-		'--output', str(output_path / 'perfdata'), '--', *command ], stdout=sys.stdout, stderr=sys.stderr)
-	# todo: necessary?
-	#chmod -R ug+rX "${output_path}"
-	#os.chmod()
+			perf_exe, 'record', *PERF_RECORD_PARAMS,
+				'--switch-output=1G', '--no-no-buildid',
+				'--output', str(output_path / 'perfdata'),
+				'--pid', csv(pids),
+		],
+		stdout=sys.stderr, stderr=sys.stderr,
+	)
+
+	class Finisher:
+		def finish(self):
+			perf_proc.communicate()
+			# os.chmod() is not recursive - use system chmod instead
+			chmod_exe = shutil.which('chmod')
+			sub.call([ chmod_exe, '--recursive', 'ug+rX', str(output_path) ])
+			return perf_proc
+	return Finisher()
 
 def setup_output_path(exe_path):
 	# todo: necessary?
@@ -163,12 +175,18 @@ def main_collect(args):
 	exe_path = Path(shutil.which(command[0]) or Path(command[0]).resolve()).absolute()
 	exe_path.is_file() or _raise(Exception(f"{exe_path} not found (is it a shell builtin?)"))
 	output_path = setup_output_path(exe_path)
-	if args.format == 'perfdata':
-		collect_perfdata(command, output_path)
-	elif args.format == 'prof':
-		collect_prof(command, output_path, exe_path, args.binary or [exe_path])
-	else:
-		raise Exception(f"unknown format {args.format}")
+
+	assert(args.format == 'perfdata' or args.format == 'prof')
+
+	command_proc = start_command_proc(command, exe_path)
+	try:
+		if args.format == 'perfdata':
+			attached = attach_perfdata([command_proc.pid], output_path)
+		elif args.format == 'prof':
+			attached = attach_prof([command_proc.pid], output_path, args.binary or [exe_path])
+		attached.finish()
+	finally:
+		command_proc.communicate()
 
 
 def get_matching_pids(exe_path, on_error=debug):
@@ -206,7 +224,7 @@ def main_attach(args):
 		raise Exception('todo: --format=perfdata not yet supported')
 	elif args.format == 'prof':
 		binaries = args.binary or ([exe_path] if exe_path.exists() else _raise(Exception(f"{exe_path} not found")))
-		attach_prof(pids, output_path, binaries).wait()
+		attach_prof(pids, output_path, binaries).finish()
 	else:
 		raise Exception(f"unknown format {args.format}")
 
