@@ -168,23 +168,25 @@ def attach_perfdata(pids, output_path):
 		chmod_exe = shutil.which('chmod')
 		sub.call([ chmod_exe, '--recursive', 'ug+rX', str(output_path) ])
 
-def setup_output_path(exe_path):
+def setup_output_path(exe_path_or_name):
 	# todo: necessary?
 	os.umask(0o0027)
 
 	def stamp_default():
 		import hashlib
-		try:
-			with open(exe_path, 'rb') as f:
-				return hashlib.file_digest(f, 'sha256').hexdigest()
-		except FileNotFoundError:
-			return hashlib.sha256(str(exe_path).encode()).hexdigest()
+		if not isinstance(exe_path_or_name, str):
+			try:
+				with open(exe_path_or_name, 'rb') as f:
+					return hashlib.file_digest(f, 'sha256').hexdigest()
+			except FileNotFoundError:
+				pass
+		return hashlib.sha256(str(exe_path_or_name).encode()).hexdigest()
 
 	import time
 
 	PERFDATA_STAMP = os.environ.get('PERFDATA_STAMP') or stamp_default()
 	PERFDATA_ID = f"{PERFDATA_STAMP}-{round(time.time())}-{os.getpid()}"
-	profile_dir = get_profile_dir(exe_path.resolve().name)
+	profile_dir = get_profile_dir(Path(exe_path_or_name).name)
 	return profile_dir / f"{PERFDATA_ID}.perfdata"
 
 
@@ -210,19 +212,15 @@ def main_collect(args):
 		return command_proc.returncode
 
 
-def get_matching_pids(exe_path, on_error=debug):
+def get_matching_pids(is_match, on_error=debug):
 	proc = Path('/proc')
 	pids = []
 	for p in proc.iterdir():
 		try:
 			if p.is_dir():
 				pexe = (p / 'exe').resolve()
-				if len(exe_path.parts) > 1 or exe_path.exists():
-					if pexe.exists() and exe_path.samefile(pexe):
-						pids.append(int(p.name))
-				else:
-					if exe_path.name == pexe.name:
-						pids.append(int(p.name))
+				if pexe.exists() and is_match(pexe):
+					pids.append(int(p.name))
 		except PermissionError as error:
 			on_error(error)
 	return pids
@@ -230,22 +228,26 @@ def get_matching_pids(exe_path, on_error=debug):
 def main_attach(args):
 	assert(args.format == 'perfdata' or args.format == 'prof')
 
+	exe_path = None
+
 	if args.pid:
 		exe_path = Path('/proc', str(args.pid), 'exe').resolve()
 		pids = [args.pid]
+	elif args.path:
+		exe_path = Path(args.path).absolute()
+		pids = get_matching_pids(lambda pexe: pexe.samefile(exe_path))
 	elif args.name:
-		exe_path = Path(args.name)
-		pids = get_matching_pids(exe_path)
+		pids = get_matching_pids(lambda pexe: pexe.name == args.name)
 	else:
-		raise Exception('no --name or --pid specified')
+		raise Exception('must specify one of --pid --path or --name')
 
-	output_path = setup_output_path(exe_path)
+	output_path = setup_output_path(exe_path or args.name)
 
 	def attach():
 		if args.format == 'perfdata':
 			return attach_perfdata(pids, output_path)
 		elif args.format == 'prof':
-			binaries = args.binary or ([exe_path] if exe_path.exists() else _raise(Exception(f"{exe_path} not found")))
+			binaries = args.binary or ([exe_path] if exe_path and exe_path.exists() else _raise(Exception(f"{exe_path} not found")))
 			return attach_prof(pids, output_path, binaries)
 
 	with attach() as attached_proc:
@@ -271,17 +273,18 @@ if __name__ == '__main__':
 	#attach_group.add_argument('--wait', action='store_true')
 	pgroup = attach_group.add_mutually_exclusive_group()
 	pgroup.add_argument('--pid', type=int)
+	pgroup.add_argument('--path', type=Path)
 	pgroup.add_argument('--name')
 
 	cli.add_argument('command', nargs=argparse.REMAINDER)
 
 	args = cli.parse_args()
 
-	if args.pid or args.name:
+	if args.pid or args.path or args.name:
 		assert(not args.command)
 		main_attach(args)
 	elif args.command:
-		assert(not args.pid and not args.name)
+		assert(not args.pid and not args.path and not args.name)
 		main_collect(args)
 	else:
 		cli.print_help()
