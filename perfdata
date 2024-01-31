@@ -8,7 +8,7 @@ import signal
 import subprocess as sub
 import sys
 
-SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 def debug(*args):
 	print(*args, file=sys.stderr)
@@ -19,11 +19,11 @@ def is_truthy(val):
 	return val and val.casefold() == 'true'.casefold() or val == '1'
 
 def get_profile_dir_default(name):
-	XDG_CACHE_HOME = os.environ.get('XDG_CACHE_HOME') or os.path.join(os.environ['HOME'], '.cache')
-	return os.path.join(XDG_CACHE_HOME, 'perfdata', name)
+	XDG_CACHE_HOME = Path(os.environ.get('XDG_CACHE_HOME') or Path(os.environ['HOME']) / '.cache')
+	return XDG_CACHE_HOME / 'perfdata' / name
 
 def get_profile_dir(name):
-	return os.environ.get('PERFDATA_PROFILE_DIR') or get_profile_dir_default(name)
+	return Path(os.environ.get('PERFDATA_PROFILE_DIR') or get_profile_dir_default(name))
 
 
 # todo: cleanup
@@ -53,11 +53,11 @@ perf_exe = shutil.which('perf')
 
 
 def attach_prof(pids, output_path, binaries):
-	PROF_OUTPUT = f"{output_path}.prof"
-	PROF_OUTPUT_PART = f"{PROF_OUTPUT}.part"
-	os.makedirs(os.path.dirname(PROF_OUTPUT), exist_ok=True)
+	prof_output = Path(f"{output_path}.prof")
+	prof_output_part = Path(f"{prof_output}.part")
+	prof_output.parent.mkdir(parents=True, exist_ok=True)
 
-	perf2prof_exe = os.path.join(SCRIPT_DIR, 'perf2prof')
+	perf2prof_exe = SCRIPT_DIR / 'perf2prof'
 
 	# perf output pipes straight to perf2prof
 	pid_arg = f"--pid={str.join(',', [str(pid) for pid in pids])}"
@@ -65,8 +65,8 @@ def attach_prof(pids, output_path, binaries):
 		stdout=sub.PIPE, stderr=sys.stderr,
 	)
 	try:
-		binary_args = [b for b in binaries for b in ['--binary', b]]
-		perf2prof_proc = sub.Popen([ perf2prof_exe, '-', *binary_args, '--output', PROF_OUTPUT_PART ],
+		binary_args = [b for b in binaries for b in ['--binary', str(b)]]
+		perf2prof_proc = sub.Popen([ str(perf2prof_exe), '-', *binary_args, '--output', str(prof_output_part) ],
 			# using another process group to prevent the shell sending SIGINT directly to the worker
 			preexec_fn=os.setpgrp,
 			# todo: python 3.11 has some interesting properties like
@@ -80,8 +80,8 @@ def attach_prof(pids, output_path, binaries):
 				try:
 					perf2prof_proc.communicate()
 					if perf2prof_proc.returncode == 0:
-						os.rename(PROF_OUTPUT_PART, PROF_OUTPUT)
-						debug(f"finished {PROF_OUTPUT}")
+						prof_output_part.rename(prof_output)
+						debug(f"finished {prof_output}")
 					else:
 						debug('perf2prof failed - stop recording')
 					return perf2prof_proc.returncode
@@ -94,9 +94,9 @@ def attach_prof(pids, output_path, binaries):
 		raise
 
 
-def collect_prof(command, output_path, command_exe, binaries):
+def collect_prof(command, output_path, exe_path, binaries):
 	# this is the main user process - it gets priority on stdin and stdout
-	command_proc = sub.Popen([ command_exe, *command[1:] ],
+	command_proc = sub.Popen([ str(exe_path), *command[1:] ],
 		stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
 	)
 	try:
@@ -116,7 +116,7 @@ def collect_prof(command, output_path, command_exe, binaries):
 		command_proc.wait()
 
 def collect_perfdata(command, output_path):
-	os.makedirs(output_path, exist_ok=True)
+	output_path.mkdir(parents=True, exist_ok=True)
 
 	# compression uses extra cpu time - much more at higher levels
 	# compression levels >= 10 cause lost samples on my system
@@ -130,10 +130,10 @@ def collect_perfdata(command, output_path):
 	flock_exe = shutil.which('flock')
 
 	perf_proc = sub.Popen([
-		flock_exe, '--exclusive', '--timeout', '10', '--no-fork', output_path,
+		flock_exe, '--exclusive', '--timeout', '10', '--no-fork', str(output_path),
 		perf_exe, 'record', *PERF_RECORD_PARAMS,
 		'--switch-output=1G', '--no-no-buildid',
-		f"--output={output_path}/perfdata", '--', *command ], stdout=sys.stdout, stderr=sys.stderr)
+		'--output', str(output_path / 'perfdata'), '--', *command ], stdout=sys.stdout, stderr=sys.stderr)
 	# todo: necessary?
 	#chmod -R ug+rX "${output_path}"
 	#os.chmod()
@@ -148,21 +148,20 @@ def setup_output_path(exe_path):
 			with open(exe_path, 'rb') as f:
 				return hashlib.file_digest(f, 'sha256').hexdigest()
 		except FileNotFoundError:
-			return hashlib.sha256(exe_path.encode()).hexdigest()
+			return hashlib.sha256(str(exe_path).encode()).hexdigest()
 
 	import time
 
 	PERFDATA_STAMP = os.environ.get('PERFDATA_STAMP') or stamp_default()
 	PERFDATA_ID = f"{PERFDATA_STAMP}-{round(time.time())}-{os.getpid()}"
-	profile_dir = get_profile_dir(os.path.basename(os.path.realpath(exe_path)))
-	output_path = f"{os.path.join(profile_dir, PERFDATA_ID)}.perfdata"
-	return output_path
+	profile_dir = get_profile_dir(exe_path.resolve().name)
+	return profile_dir / f"{PERFDATA_ID}.perfdata"
 
 
 def main_collect(args):
 	command = args.command[1:] if args.command[0] == '--' else args.command
-	exe_path = shutil.which(command[0]) or os.path.realpath(command[0])
-	os.path.isfile(exe_path) or _raise(Exception(f"{exe_path} not found (is it a shell builtin?)"))
+	exe_path = Path(shutil.which(command[0]) or Path(command[0]).resolve()).absolute()
+	exe_path.is_file() or _raise(Exception(f"{exe_path} not found (is it a shell builtin?)"))
 	output_path = setup_output_path(exe_path)
 	if args.format == 'perfdata':
 		collect_perfdata(command, output_path)
@@ -199,14 +198,14 @@ def main_attach(args):
 	else:
 		raise Exception('no --name or --pid specified')
 
-	output_path = setup_output_path(str(exe_path))
+	output_path = setup_output_path(exe_path)
 
 	debug('pids', pids, output_path)
 
 	if args.format == 'perfdata':
 		raise Exception('todo: --format=perfdata not yet supported')
 	elif args.format == 'prof':
-		binaries = args.binary or ([str(exe_path)] if exe_path.exists() else _raise(Exception(f"{exe_path} not found")))
+		binaries = args.binary or ([exe_path] if exe_path.exists() else _raise(Exception(f"{exe_path} not found")))
 		attach_prof(pids, output_path, binaries).wait()
 	else:
 		raise Exception(f"unknown format {args.format}")
