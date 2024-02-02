@@ -172,24 +172,23 @@ def attach_perfdata(pids, output_path):
 		chmod_exe = shutil.which('chmod')
 		sub.call([ chmod_exe, '--recursive', 'ug+rX', str(output_path) ])
 
-def setup_output_path(exe_path_or_name, pids):
+def setup_output_path(exe_path, pids):
 	# todo: necessary?
 	os.umask(0o0027)
 
 	def stamp_default():
 		import hashlib
-		if not isinstance(exe_path_or_name, str):
-			try:
-				with open(exe_path_or_name, 'rb') as f:
-					return hashlib.file_digest(f, 'sha256').hexdigest()
-			except FileNotFoundError:
-				pass
-		return hashlib.sha256(str(exe_path_or_name).encode()).hexdigest()
+		try:
+			with open(exe_path, 'rb') as f:
+				return hashlib.file_digest(f, 'sha256').hexdigest()
+		except FileNotFoundError:
+			pass
+		return hashlib.sha256(str(exe_path).encode()).hexdigest()
 
 
 	PERFDATA_STAMP = os.environ.get('PERFDATA_STAMP') or stamp_default()
 	PERFDATA_ID = f"{PERFDATA_STAMP}-{round(time.time())}-{csv(pids)}"
-	profile_dir = get_profile_dir(Path(exe_path_or_name).name)
+	profile_dir = get_profile_dir(exe_path.name)
 	return profile_dir / f"{PERFDATA_ID}.perfdata"
 
 
@@ -241,20 +240,14 @@ def get_exe_path(pid):
 def main_attach(args):
 	assert(args.format == 'perfdata' or args.format == 'prof')
 
-	exe_path = (
-		get_exe_path(args.pid) if args.pid
-		else Path(args.path).absolute() if args.path
-		else None if args.name
-		else _raise(Exception('must specify one of --pid --path or --name'))
-	)
-
-	def attach(pids):
-		output_path = setup_output_path(exe_path or args.name, pids)
+	def attach(pid):
+		exe_path = get_exe_path(pid)
+		output_path = setup_output_path(exe_path, {pid})
 		if args.format == 'perfdata':
-			return attach_perfdata(pids, output_path)
+			return attach_perfdata({pid}, output_path)
 		elif args.format == 'prof':
 			binaries = args.binary or ([exe_path] if exe_path and exe_path.exists() else _raise(Exception(f"{exe_path} not found")))
-			return attach_prof(pids, output_path, binaries)
+			return attach_prof({pid}, output_path, binaries)
 
 	# usually these errors are permission denied for other users' processes
 	# log each one once to notify the caller without spamming messages
@@ -284,17 +277,20 @@ def main_attach(args):
 			while not done_waiting.is_set():
 				all_pids = (
 					{args.pid} if args.pid
-					else get_matching_pids(lambda p: extract_exe_path(p, on_error=on_extract_error).samefile(exe_path)) if exe_path
+					else get_matching_pids(lambda p: extract_exe_path(p, on_error=on_extract_error).samefile(Path(args.path).absolute())) if args.path
 					else get_matching_pids(lambda p: extract_exe_path(p, on_error=on_extract_error).name == args.name)  if args.name
 					else _raise(Exception('must specify one of --pid --path or --name'))
 				)
 
-				new_pids = {p for p in all_pids if p not in attached_pids}
-				if new_pids:
-					attached_proc = stack.enter_context(attach(new_pids))
+				# it is possible to attach to multiple processes
+				# but perf-record acts kinda weird in this situation
+				# so attach a separate profiler for each process
+				new_pids = (p for p in all_pids if p not in attached_pids)
+				for pid in new_pids:
+					attached_proc = stack.enter_context(attach(pid))
 					attached_procs.append(attached_proc)
-					attached_pids |= new_pids
-					debug(f"attached {attached_proc.pid} to {new_pids}")
+					attached_pids |= {pid}
+					debug(f"attached {attached_proc.pid} to {pid}")
 
 				wait_seconds = 1 if args.wait else None
 				for attached_proc in attached_procs:
@@ -304,7 +300,7 @@ def main_attach(args):
 					else:
 						attached_procs.remove(attached_proc)
 						finished_procs.append(attached_proc)
-						debug(f"finished {attached_proc.pid}")
+						debug(f"exited {attached_proc.pid}")
 				else:
 					time.sleep(wait_seconds)
 
