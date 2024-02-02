@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 
+import contextlib
 from contextlib import contextmanager
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import shutil
 import signal
 import subprocess as sub
 import sys
+import time
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -15,6 +17,8 @@ def debug(*args):
 	print(*args, file=sys.stderr)
 
 def _raise(ex): raise ex
+
+def _pass(*a, **k): pass
 
 def is_truthy(val):
 	return val and val.casefold() == 'true'.casefold() or val == '1'
@@ -98,7 +102,7 @@ def attach_prof(pids, output_path, binaries):
 		perf_proc.stdout.close() # perf2prof now owns this pipe - perf should get SIGPIPE if it closes early
 
 		try:
-			yield perf2prof_proc
+			yield perf_proc
 		finally:
 			try:
 				perf2prof_proc.communicate()
@@ -168,7 +172,7 @@ def attach_perfdata(pids, output_path):
 		chmod_exe = shutil.which('chmod')
 		sub.call([ chmod_exe, '--recursive', 'ug+rX', str(output_path) ])
 
-def setup_output_path(exe_path_or_name):
+def setup_output_path(exe_path_or_name, pids):
 	# todo: necessary?
 	os.umask(0o0027)
 
@@ -182,10 +186,9 @@ def setup_output_path(exe_path_or_name):
 				pass
 		return hashlib.sha256(str(exe_path_or_name).encode()).hexdigest()
 
-	import time
 
 	PERFDATA_STAMP = os.environ.get('PERFDATA_STAMP') or stamp_default()
-	PERFDATA_ID = f"{PERFDATA_STAMP}-{round(time.time())}-{os.getpid()}"
+	PERFDATA_ID = f"{PERFDATA_STAMP}-{round(time.time())}-{csv(pids)}"
 	profile_dir = get_profile_dir(Path(exe_path_or_name).name)
 	return profile_dir / f"{PERFDATA_ID}.perfdata"
 
@@ -196,14 +199,15 @@ def main_collect(args):
 	command = args.command[1:] if args.command[0] == '--' else args.command
 	exe_path = Path(shutil.which(command[0]) or Path(command[0]).resolve()).absolute()
 	exe_path.is_file() or _raise(Exception(f"{exe_path} not found (is it a shell builtin?)"))
-	output_path = setup_output_path(exe_path)
 
 	with start_command_proc(command, exe_path) as command_proc:
 		def attach():
+			pids = {command_proc.pid}
+			output_path = setup_output_path(exe_path, pids)
 			if args.format == 'perfdata':
-				return attach_perfdata([command_proc.pid], output_path)
+				return attach_perfdata(pids, output_path)
 			elif args.format == 'prof':
-				return attach_prof([command_proc.pid], output_path, args.binary or [exe_path])
+				return attach_prof(pids, output_path, args.binary or [exe_path])
 
 		with attach() as attached_proc:
 			debug(f"attached to {command_proc.pid}")
@@ -212,53 +216,107 @@ def main_collect(args):
 		return command_proc.returncode
 
 
-def get_matching_pids(is_match, on_error=debug):
+def get_matching_pids(is_match, on_error=None):
 	proc = Path('/proc')
-	pids = []
 	for p in proc.iterdir():
 		try:
-			if p.is_dir():
-				pexe = (p / 'exe').resolve()
-				if pexe.exists() and is_match(pexe):
-					pids.append(int(p.name))
-		except PermissionError as error:
-			on_error(error)
-	return pids
+			if p.is_dir() and is_match(p):
+				yield int(p.name)
+		except Exception as error:
+			(on_error or _pass)(error)
+
+def extract_exe_path(p, on_error=None):
+	try:
+		p_exe = (p / 'exe').resolve()
+		if p_exe.exists(): return p_exe
+	except Exception as error:
+		(on_error or _pass)(error)
+	cmdline = (p / 'cmdline').read_text().split('\x00')
+	return Path(cmdline[0])
+
+def get_exe_path(pid):
+	return extract_exe_path(Path('/proc', str(pid)), on_error=debug)
+
 
 def main_attach(args):
 	assert(args.format == 'perfdata' or args.format == 'prof')
 
-	exe_path = None
+	exe_path = (
+		get_exe_path(args.pid) if args.pid
+		else Path(args.path).absolute() if args.path
+		else None if args.name
+		else _raise(Exception('must specify one of --pid --path or --name'))
+	)
 
-	if args.pid:
-		exe_path = Path('/proc', str(args.pid), 'exe').resolve()
-		pids = [args.pid]
-	elif args.path:
-		exe_path = Path(args.path).absolute()
-		pids = get_matching_pids(lambda pexe: pexe.samefile(exe_path))
-	elif args.name:
-		pids = get_matching_pids(lambda pexe: pexe.name == args.name)
-	else:
-		raise Exception('must specify one of --pid --path or --name')
-
-	output_path = setup_output_path(exe_path or args.name)
-
-	def attach():
+	def attach(pids):
+		output_path = setup_output_path(exe_path or args.name, pids)
 		if args.format == 'perfdata':
 			return attach_perfdata(pids, output_path)
 		elif args.format == 'prof':
 			binaries = args.binary or ([exe_path] if exe_path and exe_path.exists() else _raise(Exception(f"{exe_path} not found")))
 			return attach_prof(pids, output_path, binaries)
 
-	with attach() as attached_proc:
-		def handler(signum, frame):
-			signame = signal.strsignal(signum)
-			debug(f"shutting down on {signame}")
-			attached_proc.terminate()
-		signal_append_all([signal.SIGINT, signal.SIGTERM, signal.SIGQUIT], handler)
-		debug(f"attached to {pids}")
-		attached_proc.communicate()
-		return attached_proc.returncode
+	# usually these errors are permission denied for other users' processes
+	# log each one once to notify the caller without spamming messages
+	extract_errors = set()
+	def on_extract_error(ex):
+		ex_string = str(ex)
+		if not ex_string in extract_errors:
+			extract_errors.add(ex_string)
+			debug(ex)
+		raise ex
+
+	attached_pids  = set()
+	attached_procs = []
+	finished_procs = []
+
+	from threading import Event
+
+	done_waiting = Event()
+	def handler(signum, frame):
+		signame = signal.strsignal(signum)
+		debug(f"ending wait on {signame}")
+		done_waiting.set()
+	signal_append_all([signal.SIGINT, signal.SIGTERM, signal.SIGQUIT], handler)
+
+	with contextlib.ExitStack() as stack:
+		try:
+			while not done_waiting.is_set():
+				all_pids = (
+					{args.pid} if args.pid
+					else get_matching_pids(lambda p: extract_exe_path(p, on_error=on_extract_error).samefile(exe_path)) if exe_path
+					else get_matching_pids(lambda p: extract_exe_path(p, on_error=on_extract_error).name == args.name)  if args.name
+					else _raise(Exception('must specify one of --pid --path or --name'))
+				)
+
+				new_pids = {p for p in all_pids if p not in attached_pids}
+				if new_pids:
+					attached_proc = stack.enter_context(attach(new_pids))
+					attached_procs.append(attached_proc)
+					attached_pids |= new_pids
+					debug(f"attached {attached_proc.pid} to {new_pids}")
+
+				wait_seconds = 1 if args.wait else None
+				for attached_proc in attached_procs:
+					try:
+						attached_proc.communicate(timeout = wait_seconds / len(attached_procs))
+					except sub.TimeoutExpired: pass
+					else:
+						attached_procs.remove(attached_proc)
+						finished_procs.append(attached_proc)
+						debug(f"finished {attached_proc.pid}")
+				else:
+					time.sleep(wait_seconds)
+
+				if not args.wait: break
+		finally:
+			for attached_proc in attached_procs:
+				debug(f"terminating {attached_proc.pid}")
+				attached_proc.terminate()
+				attached_proc.communicate()
+				finished_procs.append(attached_proc)
+
+	return finished_procs
 
 
 if __name__ == '__main__':
@@ -270,7 +328,7 @@ if __name__ == '__main__':
 	cli.add_argument('--binary', action='append')
 
 	attach_group = cli.add_argument_group('attach')
-	#attach_group.add_argument('--wait', action='store_true')
+	attach_group.add_argument('--wait', action='store_true')
 	pgroup = attach_group.add_mutually_exclusive_group()
 	pgroup.add_argument('--pid', type=int)
 	pgroup.add_argument('--path', type=Path)
