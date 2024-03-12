@@ -54,7 +54,7 @@ def get_profile_dir(name):
 # todo: cleanup
 
 # perf notes
-	# todo: does --event=br_inst_retired.all_branches gather enough data?
+	# todo: does --event=branches gather enough data?
 	# in this example - https://groups.google.com/g/llvm-dev/c/-Ao1uXCi8QM
 	# they filter on --event=br_inst_retired.near_taken which doesn't produce anything useful for me
 
@@ -70,7 +70,7 @@ PERF_RECORD_PARAMS = [
 	PERF_BRANCH_FILTER,
 	'--mmap-flush=128K',
 	'--call-graph=fp',
-	'--event=br_inst_retired.all_branches:uP',
+	'--event=branches:uP',
 ]
 
 perf_exe = shutil.which('perf')

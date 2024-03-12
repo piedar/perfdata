@@ -22,7 +22,7 @@ And indeed it is true that `perf record` with properly tuned `--mmap-flush=` add
 
 But `perf record --branch-filter 'any,u'` makes massive dumps of data - about 10 GiB per hour or even more with `--freq=max`.
 Compression can save space, but of course this adds more CPU overhead.
-Even better, we can use an event filter like `--event=br_inst_retired.all_branches` to reduce the amount of data being gathered and processed.
+Even better, we can use an event filter like `--event=branches` to reduce the amount of data being gathered and processed.
 
 Once the raw data is recorded it has to be summarized in a format a compiler can understand.
 
