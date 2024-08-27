@@ -11,12 +11,14 @@ set -e
 
 print_help() {
 	<<EOF cat >&2
-usage: ${0} --binary <b> [--output {default.prof}] [--pid {}] <file|directory>...
+usage: ${0} --binary <b>... [--output {default.prof}] [--pid {}] <file|directory>...
 
 This program converts all provided .perfdata (perf record) files and/or directories to .prof (llvm) format.
 It combines them into a single output file without leaving any intermediate files behind.
 
---binary <b>              binary used when capturing the .perfdata files (required)
+--binary <b>...           binary used when generating the .perfdata files (at least one required)
+                          supply the exe or lib with the most important code paths
+                          multiple binaries can be applied at the cost of CPU time
 [--output {default.prof}] output file for the combined .prof result
 [--pid {}]                if provided, include events from this process id only
 
@@ -26,14 +28,14 @@ EOF
 }
 
 PERFDATA_INPUTS=()
-PERFDATA_BINARY_ARGS=()
+PERFDATA_BINARIES=()
 
 # todo: accept arguments in the form --output=foo
 while [[ $# -gt 0 ]]; do
 	case $1 in
 		-h|--help) print_help; exit 0 ;;
 		# llvm-profgen does not follow --binary symlinks - todo: fix upstream
-		--binary) PERFDATA_BINARY_ARGS+=(--binary "$(realpath "${2}")"); shift ;;
+		--binary) PERFDATA_BINARIES+=("$(realpath "${2}")"); shift ;;
 		-o|--output) PROF_OUTPUT="${2}"; shift ;;
 		--pid) PERFDATA_PID="${2}"; shift ;;
 		*) PERFDATA_INPUTS+=("${1}") ;;
@@ -43,7 +45,7 @@ done
 
 : "${PROF_OUTPUT:=default.prof}"
 : "${PERFDATA_INPUTS:?}"
-: "${PERFDATA_BINARY_ARGS:?}"
+: "${PERFDATA_BINARIES:?}"
 
 [ -n "${PERFDATA_PID}" ] && PID_PARAMETERS="$(printf -- '--pid=%s ' ${PERFDATA_PID})"
 
@@ -52,58 +54,67 @@ _perf-script() {
 	perf script --force --show-mmap-events --fields '-sym' --fields 'ip,brstack' ${PID_PARAMETERS} "${@}"
 }
 
+ALL_FILES=()
+for PERFDATA in "${PERFDATA_INPUTS[@]}"; do
+	# single file or all files in a directory
+	[ -d "${PERFDATA}" ] && ALL_FILES+=("${PERFDATA}"/*) || ALL_FILES+=("${PERFDATA}")
+done
+
+_perf-script_all() {
+	for f in "${ALL_FILES[@]}"; do _perf-script -i "${f}"; done
+}
+
 # my patched llvm-profgen accepts a piped perfscript and llvm-profdata accepts piped file descriptors
 [[ "$(llvm-profdata merge --sample <(echo test) 2>&1)" == "error: no input file"* ]] &&
 	PERFDATA_HAS_PIPING_PROF=false || PERFDATA_HAS_PIPING_PROF=true
 
+#set -x
+#PERFDATA_HAS_PIPING_PROF=false
+
 if ${PERFDATA_HAS_PIPING_PROF}; then
 	# https://stackoverflow.com/questions/51849506/adding-process-substitutions-to-a-command-line-with-a-loop-in-bash
+	INPUT_FILES=()
 	PROFGEN_FILES=()
-	for PERFDATA in "${PERFDATA_INPUTS[@]}"; do
-		# single file or all files in a directory
-		[ -d "${PERFDATA}" ] && ALL_FILES=("${PERFDATA}"/*) || ALL_FILES=("${PERFDATA}")
-
-		exec {prof_fd}< <( for F in "${ALL_FILES[@]}"; do _perf-script -i "${F}"; done |
-			llvm-profgen --perfscript=/dev/stdin ${PERFDATA_BINARY_ARGS[@]} --format=text --output=-)
+	for binary in "${PERFDATA_BINARIES[@]}"; do
+		exec {input_fd}< <( : )
+		INPUT_FILE="/dev/fd/${input_fd}"
+		exec {prof_fd}< <( llvm-profgen --perfscript="${INPUT_FILE}" --binary="${binary}" --format=text --output=- )
+		INPUT_FILES+=("${INPUT_FILE}")
 		PROFGEN_FILES+=("/dev/fd/${prof_fd}")
 	done
 
-	llvm-profdata merge --sample "${PROFGEN_FILES[@]}" --output="${PROF_OUTPUT}"
+	# start consuming output of llvm-profgen
+	llvm-profdata merge --failure-mode=all --sample "${PROFGEN_FILES[@]}" --output="${PROF_OUTPUT}" &
+
+	# copy perf script output to all llvm-profgen workers
+	_perf-script_all | tee "${INPUT_FILES[@]}" >/dev/null
 
 	# close the temporary file descriptors
-	for prof_fd in "${PROFGEN_FILES[@]#/dev/fd/}"; do
-		exec {prof_fd}>&-
+	for fd in "${INPUT_FILES[@]#/dev/fd/}" "${PROFGEN_FILES[@]#/dev/fd/}"; do
+		exec {fd}>&-
 	done
 
-	exit 0
-fi
+	wait # for llvm-profdata which waits on its own inputs
+else
+	# without streaming llvm, we must use temp files
 
+	PERFDATA_TMPDIR="$(mktemp -d)"
+	trap "rm -rf ${PERFDATA_TMPDIR}" EXIT
 
-# without streaming llvm, we must use temp files
-
-PERFDATA_TMPDIR="$(mktemp -d)"
-mkdir -p "${PERFDATA_TMPDIR}"
-trap "rm -rf ${PERFDATA_TMPDIR}" EXIT
-
-PROFGEN_FILES=()
-
-for PERFDATA in "${PERFDATA_INPUTS[@]}"; do
 	# llvm-profgen accepts --perfdata= but it writes the script to a tmp file in the same location as the input
 	# https://github.com/llvm/llvm-project/blob/llvmorg-17.0.6/llvm/tools/llvm-profgen/PerfReader.cpp#L354
 	# use a temporary location to avoid directory pollution
 
-	# single file or all files in a directory
-	[ -d "${PERFDATA}" ] && ALL_FILES=("${PERFDATA}"/*) || ALL_FILES=("${PERFDATA}")
-
 	perfscript="$(mktemp --suffix='.perfscript' --tmpdir="${PERFDATA_TMPDIR}")"
-	for PFD in "${ALL_FILES[@]}"; do
-		_perf-script -i "${PFD:?}" >> "${perfscript:?}"
+	_perf-script_all > "${perfscript:?}"
+
+	PROFGEN_FILES=()
+	for binary in "${PERFDATA_BINARIES[@]}"; do
+		profdata="$(mktemp --dry-run --suffix='.prof' --tmpdir="${PERFDATA_TMPDIR}")"
+		llvm-profgen --perfscript="${perfscript}" --binary="${binary}" --output="${profdata}" &
+		PROFGEN_FILES+=( "${profdata}" )
 	done
 
-	profdata="$(mktemp --dry-run --suffix='.prof' --tmpdir="${PERFDATA_TMPDIR}")"
-	llvm-profgen --perfscript="${perfscript}" ${PERFDATA_BINARY_ARGS[@]} --output="${profdata}"
-
-	PROFGEN_FILES+=( "${profdata}" )
-done
-
-llvm-profdata merge --sample "${PROFGEN_FILES[@]}" --output="${PROF_OUTPUT}"
+	wait # for llvm-profgen to finish writing all files
+	llvm-profdata merge --failure-mode=all --sample "${PROFGEN_FILES[@]}" --output="${PROF_OUTPUT}"
+fi

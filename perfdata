@@ -93,7 +93,7 @@ def attach_prof(pids, output_path, binaries):
 	)
 	try:
 		binary_args = [b for b in binaries for b in ['--binary', str(b)]]
-		perf2prof_proc = sub.Popen([ str(perf2prof_exe), '-', *binary_args, '--output', str(prof_output_part) ],
+		perf2prof_proc = sub.Popen([ str(perf2prof_exe), '/dev/stdin', *binary_args, '--output', str(prof_output_part) ],
 			# using a separate session to prevent the shell sending SIGINT directly to the worker
 			start_new_session=True,
 			stdin=perf_proc.stdout, stdout=sys.stderr, stderr=sys.stderr,
