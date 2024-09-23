@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 
-import contextlib
-from contextlib import contextmanager
+import asyncio
 import os
 from pathlib import Path
 import shutil
 import signal
-import subprocess as sub
 import sys
 import time
 
@@ -76,8 +74,7 @@ PERF_RECORD_PARAMS = [
 
 perf_exe = shutil.which('perf')
 
-@contextmanager
-def attach_prof(pids, output_path, binaries):
+async def attach_prof(pids, output_path, binaries):
 	prof_output = Path(f"{output_path}.prof")
 	prof_output_part = Path(f"{prof_output}.part")
 	prof_output.parent.mkdir(parents=True, exist_ok=True)
@@ -85,43 +82,45 @@ def attach_prof(pids, output_path, binaries):
 	perf2prof_exe = SCRIPT_DIR / 'perf2prof'
 
 	# perf output pipes straight to perf2prof
-	perf_proc = sub.Popen([
-			perf_exe, 'record', *PERF_RECORD_PARAMS, '--output=-',
-				'--pid', csv(pids),
-		],
-		stdout=sub.PIPE, stderr=sys.stderr,
+	# https://stackoverflow.com/a/36666420
+	perf_read, perf_write = os.pipe()
+	perf_proc = await asyncio.create_subprocess_exec(
+		perf_exe, 'record', *PERF_RECORD_PARAMS, '--output=-',
+			'--pid', csv(pids),
+		stdout=perf_write, stderr=sys.stderr,
 	)
+	os.close(perf_write) # belongs to perf_proc now
 	try:
 		binary_args = [b for b in binaries for b in ['--binary', str(b)]]
-		perf2prof_proc = sub.Popen([ str(perf2prof_exe), '/dev/stdin', *binary_args, '--output', str(prof_output_part) ],
+		perf2prof_proc = await asyncio.create_subprocess_exec(
+			str(perf2prof_exe), '/dev/stdin', *binary_args, '--output', str(prof_output_part),
 			# using a separate session to prevent the shell sending SIGINT directly to the worker
 			start_new_session=True,
-			stdin=perf_proc.stdout, stdout=sys.stderr, stderr=sys.stderr,
+			stdin=perf_read, stdout=sys.stderr, stderr=sys.stderr,
 		)
-		perf_proc.stdout.close() # perf2prof now owns this pipe - perf should get SIGPIPE if it closes early
+		os.close(perf_read) # belongs to perf2prof_proc now - perf_proc should get SIGPIPE if it closes early
 
-		try:
-			yield perf_proc
-		finally:
-			try:
-				perf2prof_proc.communicate()
-				if perf2prof_proc.returncode == 0:
-					prof_output_part.rename(prof_output)
-					debug(f"finished {prof_output}")
-				else:
-					debug('perf2prof failed - stop recording')
-			finally:
-				perf_proc.terminate()
+		async with asyncio.TaskGroup() as tg:
+			tg.create_task(perf_proc.communicate())
+			tg.create_task(perf2prof_proc.communicate())
+			debug(f"attached {perf_proc.pid} to {pids}")
+
+		if perf2prof_proc.returncode == 0:
+			prof_output_part.rename(prof_output)
+			debug(f"finished {prof_output}")
+		else:
+			debug('perf2prof failed - stop recording')
 
 	except:
+		debug(f"terminating {perf_proc.pid}")
 		perf_proc.terminate()
 		raise
 
 
-@contextmanager
-def start_command_proc(command, exe_path):
+async def start_command_proc(command, exe_path):
 	# this is the main user process - it gets priority on stdin and stdout
-	command_proc = sub.Popen([ str(exe_path), *command[1:] ],
+	command_proc = await asyncio.create_subprocess_exec(
+		str(exe_path), *command[1:],
 		stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
 	)
 	try:
@@ -130,16 +129,13 @@ def start_command_proc(command, exe_path):
 			debug(f"shutting down on {signame}")
 			command_proc.terminate()
 		signal_append_all([signal.SIGINT, signal.SIGTERM, signal.SIGQUIT], handler)
-		yield command_proc
+		return command_proc
 	except:
 		command_proc.terminate()
 		raise
-	else:
-		command_proc.communicate()
 
 
-@contextmanager
-def attach_perfdata(pids, output_path):
+async def attach_perfdata(pids, output_path):
 	output_path.mkdir(parents=True, exist_ok=True)
 
 	# compression uses extra cpu time - much more at higher levels
@@ -153,23 +149,23 @@ def attach_perfdata(pids, output_path):
 
 	flock_exe = shutil.which('flock')
 
-	perf_proc = sub.Popen([
+	perf_proc = await asyncio.create_subprocess_exec(
 		flock_exe, '--exclusive', '--timeout', '10', '--no-fork', str(output_path),
 			perf_exe, 'record', *PERF_RECORD_PARAMS,
 				'--switch-output=1G', '--no-no-buildid',
 				'--output', str(output_path / 'perfdata'),
 				'--pid', csv(pids),
-		],
 		stdout=sys.stderr, stderr=sys.stderr,
 	)
+	debug(f"attached {perf_proc.pid} to {pids}")
 
-	try:
-		yield perf_proc
-	finally:
-		perf_proc.communicate()
-		# os.chmod() is not recursive - use system chmod instead
-		chmod_exe = shutil.which('chmod')
-		sub.call([ chmod_exe, '--recursive', 'ug+rX', str(output_path) ])
+	await perf_proc.communicate()
+	# os.chmod() is not recursive - use system chmod instead
+	chmod_exe = shutil.which('chmod')
+	await asyncio.create_subprocess_exec(
+		chmod_exe, '--recursive', 'ug+rX', str(output_path),
+		stdout=sys.stderr, stderr=sys.stderr,
+	).communicate()
 
 def setup_output_path(exe_path, pids):
 	# todo: necessary?
@@ -191,14 +187,15 @@ def setup_output_path(exe_path, pids):
 	return profile_dir / f"{PERFDATA_ID}.perfdata"
 
 
-def main_collect(args):
+async def main_collect(args):
 	assert(args.format == 'perfdata' or args.format == 'prof')
 
 	command = args.command[1:] if args.command[0] == '--' else args.command
 	exe_path = Path(shutil.which(command[0]) or Path(command[0]).resolve()).absolute()
 	exe_path.is_file() or _raise(Exception(f"{exe_path} not found (is it a shell builtin?)"))
 
-	with start_command_proc(command, exe_path) as command_proc:
+	command_proc = await start_command_proc(command, exe_path)
+	try:
 		def attach():
 			pids = {command_proc.pid}
 			output_path = setup_output_path(exe_path, pids)
@@ -207,11 +204,14 @@ def main_collect(args):
 			elif args.format == 'prof':
 				return attach_prof(pids, output_path, args.binary or [exe_path])
 
-		with attach() as attached_proc:
-			debug(f"attached to {command_proc.pid}")
+		async with asyncio.TaskGroup() as tg:
+			tg.create_task(attach())
+			tg.create_task(command_proc.communicate())
+	except:
+		command_proc.terminate()
+		raise
 
-		command_proc.communicate()
-		return command_proc.returncode
+	return command_proc.returncode
 
 
 def get_matching_pids(is_match, on_error=None):
@@ -236,7 +236,7 @@ def get_exe_path(pid):
 	return extract_exe_path(Path('/proc', str(pid)), on_error=debug)
 
 
-def main_attach(args):
+async def main_attach(args):
 	assert(args.format == 'perfdata' or args.format == 'prof')
 
 	def attach(pid):
@@ -258,8 +258,7 @@ def main_attach(args):
 			debug(ex)
 		raise ex
 
-	attached_procs = {} # { target_pid: attached_proc }
-	finished_procs = []
+	attached_procs = {} # { target_pid: task }
 
 	from threading import Event
 
@@ -270,47 +269,35 @@ def main_attach(args):
 		done_waiting.set()
 	signal_append_all([signal.SIGINT, signal.SIGTERM, signal.SIGQUIT], handler)
 
-	with contextlib.ExitStack() as stack:
-		try:
-			while not done_waiting.is_set():
-				all_pids = (
-					{args.pid} if args.pid
-					else get_matching_pids(lambda p: extract_exe_path(p, on_error=on_extract_error).samefile(Path(args.path).absolute())) if args.path
-					else get_matching_pids(lambda p: extract_exe_path(p, on_error=on_extract_error).name == args.name)  if args.name
-					else _raise(Exception('must specify one of --pid --path or --name'))
-				)
+	async with asyncio.TaskGroup() as tg:
+		while not done_waiting.is_set():
+			all_pids = (
+				{args.pid} if args.pid
+				else get_matching_pids(lambda p: extract_exe_path(p, on_error=on_extract_error).samefile(Path(args.path).absolute())) if args.path
+				else get_matching_pids(lambda p: extract_exe_path(p, on_error=on_extract_error).name == args.name)  if args.name
+				else _raise(Exception('must specify one of --pid --path or --name'))
+			)
 
-				# it is possible to attach to multiple processes
-				# but perf-record acts kinda weird in this situation
-				# so attach a separate profiler for each process
-				new_pids = (p for p in all_pids if p not in attached_procs)
-				for pid in new_pids:
-					attached_proc = stack.enter_context(attach(pid))
-					attached_procs[pid] = attached_proc
-					debug(f"attached {attached_proc.pid} to {pid}")
+			# it is possible to attach to multiple processes
+			# but perf-record acts kinda weird in this situation
+			# so attach a separate profiler for each process
+			new_pids = (p for p in all_pids if p not in attached_procs)
+			for pid in new_pids:
+				attached_procs[pid] = tg.create_task(attach(pid))
 
-				wait_seconds = 1 if args.wait else None
-				for pid in list(attached_procs.keys()):
-					attached_proc = attached_procs[pid]
-					try:
-						attached_proc.communicate(timeout = wait_seconds / len(attached_procs))
-					except sub.TimeoutExpired: pass
-					else:
-						del attached_procs[pid]
-						finished_procs.append(attached_proc)
-						debug(f"exited {attached_proc.pid}")
+			wait_seconds = 1 if args.wait else 0
+			for pid in list(attached_procs.keys()):
+				task = attached_procs[pid]
+				try:
+					await asyncio.wait_for(asyncio.shield(task), wait_seconds / len(attached_procs))
+				except TimeoutError: pass
 				else:
-					time.sleep(wait_seconds)
+					del attached_procs[pid]
+					debug(f"detached from {pid}")
+			else:
+				await asyncio.sleep(wait_seconds)
 
-				if not args.wait: break
-		finally:
-			for attached_proc in attached_procs.values():
-				debug(f"terminating {attached_proc.pid}")
-				attached_proc.terminate()
-				attached_proc.communicate()
-				finished_procs.append(attached_proc)
-
-	return finished_procs
+			if not args.wait: break
 
 
 if __name__ == '__main__':
@@ -334,9 +321,9 @@ if __name__ == '__main__':
 
 	if args.pid or args.path or args.name:
 		assert(not args.command)
-		main_attach(args)
+		asyncio.run(main_attach(args))
 	elif args.command:
 		assert(not args.pid and not args.path and not args.name)
-		main_collect(args)
+		asyncio.run(main_collect(args))
 	else:
 		cli.print_help()
