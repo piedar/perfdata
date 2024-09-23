@@ -258,8 +258,7 @@ def main_attach(args):
 			debug(ex)
 		raise ex
 
-	attached_pids  = set()
-	attached_procs = []
+	attached_procs = {} # { target_pid: attached_proc }
 	finished_procs = []
 
 	from threading import Event
@@ -284,20 +283,20 @@ def main_attach(args):
 				# it is possible to attach to multiple processes
 				# but perf-record acts kinda weird in this situation
 				# so attach a separate profiler for each process
-				new_pids = (p for p in all_pids if p not in attached_pids)
+				new_pids = (p for p in all_pids if p not in attached_procs)
 				for pid in new_pids:
 					attached_proc = stack.enter_context(attach(pid))
-					attached_procs.append(attached_proc)
-					attached_pids |= {pid}
+					attached_procs[pid] = attached_proc
 					debug(f"attached {attached_proc.pid} to {pid}")
 
 				wait_seconds = 1 if args.wait else None
-				for attached_proc in attached_procs:
+				for pid in list(attached_procs.keys()):
+					attached_proc = attached_procs[pid]
 					try:
 						attached_proc.communicate(timeout = wait_seconds / len(attached_procs))
 					except sub.TimeoutExpired: pass
 					else:
-						attached_procs.remove(attached_proc)
+						del attached_procs[pid]
 						finished_procs.append(attached_proc)
 						debug(f"exited {attached_proc.pid}")
 				else:
@@ -305,7 +304,7 @@ def main_attach(args):
 
 				if not args.wait: break
 		finally:
-			for attached_proc in attached_procs:
+			for attached_proc in attached_procs.values():
 				debug(f"terminating {attached_proc.pid}")
 				attached_proc.terminate()
 				attached_proc.communicate()
