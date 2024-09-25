@@ -302,7 +302,7 @@ async def main_attach(args):
 			for pid in new_pids:
 				attached_procs[pid] = tg.create_task(attach(pid))
 
-			wait_seconds = 1 if args.wait else 0
+			wait_seconds = args.wait or 0
 			for pid in list(attached_procs.keys()):
 				task = attached_procs[pid]
 				try:
@@ -314,7 +314,7 @@ async def main_attach(args):
 			else:
 				await asyncio.sleep(wait_seconds)
 
-			if not args.wait: break
+			if args.wait is None: break
 
 
 if __name__ == '__main__':
@@ -326,7 +326,7 @@ if __name__ == '__main__':
 	cli.add_argument('--binary', action='append')
 
 	attach_group = cli.add_argument_group('attach')
-	attach_group.add_argument('--wait', action='store_true')
+	attach_group.add_argument('--wait', type=float, nargs='?', const=1, help='wait for new processes, pausing for WAIT seconds between attempts')
 	attach_group.add_argument('--user', type=uid, nargs='?', const=os.getuid(), help='filter processes by USER name or uid, or the current user if no argument is provided')
 	pgroup = attach_group.add_mutually_exclusive_group()
 	pgroup.add_argument('--pid', type=int)
