@@ -218,7 +218,7 @@ def get_matching_pids(is_match, on_error=None):
 	proc = Path('/proc')
 	for p in proc.iterdir():
 		try:
-			if p.is_dir() and is_match(p):
+			if p.is_dir() and p.name.isdigit() and is_match(p):
 				yield int(p.name)
 		except Exception as error:
 			(on_error or _pass)(error)
@@ -234,6 +234,20 @@ def extract_exe_path(p, on_error=None):
 
 def get_exe_path(pid):
 	return extract_exe_path(Path('/proc', str(pid)), on_error=debug)
+
+def get_loginuid(p):
+	import re
+	pstatus = (p / 'status').read_text()
+	match = re.search('Uid:\\s*(\\d+)', pstatus)
+	return int(match.group(1))
+	# this produces original user when sudo is involved
+	#return int((p / 'loginuid').read_text())
+
+def uid(uid_or_name):
+	try: return int(uid_or_name)
+	except:
+		import pwd
+		return pwd.getpwnam(uid_or_name).pw_uid
 
 
 async def main_attach(args):
@@ -258,6 +272,9 @@ async def main_attach(args):
 			debug(ex)
 		raise ex
 
+	def match_user(p):
+		return args.user is None or args.user == get_loginuid(p)
+
 	attached_procs = {} # { target_pid: task }
 
 	from threading import Event
@@ -273,8 +290,8 @@ async def main_attach(args):
 		while not done_waiting.is_set():
 			all_pids = (
 				{args.pid} if args.pid
-				else get_matching_pids(lambda p: extract_exe_path(p, on_error=on_extract_error).samefile(Path(args.path).absolute())) if args.path
-				else get_matching_pids(lambda p: extract_exe_path(p, on_error=on_extract_error).name == args.name)  if args.name
+				else get_matching_pids(lambda p: extract_exe_path(p, on_error=on_extract_error).samefile(Path(args.path).absolute()) and match_user(p)) if args.path
+				else get_matching_pids(lambda p: extract_exe_path(p, on_error=on_extract_error).name == args.name and match_user(p)) if args.name
 				else _raise(Exception('must specify one of --pid --path or --name'))
 			)
 
@@ -310,6 +327,7 @@ if __name__ == '__main__':
 
 	attach_group = cli.add_argument_group('attach')
 	attach_group.add_argument('--wait', action='store_true')
+	attach_group.add_argument('--user', type=uid, nargs='?', const=os.getuid(), help='filter processes by USER name or uid, or the current user if no argument is provided')
 	pgroup = attach_group.add_mutually_exclusive_group()
 	pgroup.add_argument('--pid', type=int)
 	pgroup.add_argument('--path', type=Path)
