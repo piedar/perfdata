@@ -71,38 +71,47 @@ async def attach_prof(pids, output_path, binaries):
 	# perf output pipes straight to perf2prof
 	# https://stackoverflow.com/a/36666420
 	perf_read, perf_write = os.pipe()
-	perf_proc = await asyncio.create_subprocess_exec(
-		perf_exe, 'record', *PERF_RECORD_PARAMS, '--output=-',
-			'--pid', csv(pids),
-		stdout=perf_write, stderr=sys.stderr,
+	perf_proc = None
+
+	binary_args = [b for b in binaries for b in ['--binary', str(b)]]
+	perf2prof_proc = await asyncio.create_subprocess_exec(
+		str(perf2prof_exe), '/dev/stdin', *binary_args, '--output', str(prof_output_part),
+		# using a separate session to prevent the shell sending SIGINT directly to the worker
+		start_new_session=True,
+		stdin=perf_read, stdout=sys.stderr, stderr=sys.stderr,
 	)
 	try:
-		os.close(perf_write) # belongs to perf_proc now
-
-		binary_args = [b for b in binaries for b in ['--binary', str(b)]]
-		perf2prof_proc = await asyncio.create_subprocess_exec(
-			str(perf2prof_exe), '/dev/stdin', *binary_args, '--output', str(prof_output_part),
-			# using a separate session to prevent the shell sending SIGINT directly to the worker
-			start_new_session=True,
-			stdin=perf_read, stdout=sys.stderr, stderr=sys.stderr,
-		)
 		os.close(perf_read) # belongs to perf2prof_proc now - perf_proc should get SIGPIPE if it closes early
+		perf_proc = await asyncio.create_subprocess_exec(
+			perf_exe, 'record', *PERF_RECORD_PARAMS, '--output=-',
+				'--pid', csv(pids),
+			stdout=perf_write, stderr=sys.stderr,
+		)
+		try:
+			os.close(perf_write) # belongs to perf_proc now
+		except:
+			perf_proc.terminate()
+			raise
+	except:
+		perf2prof_proc.terminate()
+		raise
 
+	try:
 		async with asyncio.TaskGroup() as tg:
 			tg.create_task(perf_proc.communicate())
 			tg.create_task(perf2prof_proc.communicate())
 			debug(f"attached {perf_proc.pid} to {pids}")
-
+	except:
+		debug(f"stopping perf {perf_proc.pid}")
+		perf_proc.terminate()
+		raise
+	finally:
+		await perf2prof_proc.communicate()
 		if perf2prof_proc.returncode == 0:
 			prof_output_part.rename(prof_output)
 			debug(f"finished {prof_output}")
 		else:
-			debug('perf2prof failed - stop recording')
-
-	except:
-		debug(f"terminating {perf_proc.pid}")
-		perf_proc.terminate()
-		raise
+			debug(f"perf2prof failed {perf2prof_proc.returncode}")
 
 
 async def attach_perfdata(pids, output_path):
@@ -308,7 +317,7 @@ if __name__ == '__main__':
 
 	def handler(signum, frame):
 		signame = signal.strsignal(signum)
-		raise SystemExit(f"shutting down on {signame}")
+		raise SystemExit(f"exit on {signame}")
 	signal_all([signal.SIGINT, signal.SIGTERM, signal.SIGQUIT], handler)
 
 	try:
@@ -322,6 +331,7 @@ if __name__ == '__main__':
 			cli.print_help()
 	except (KeyboardInterrupt, SystemExit) as err: debug(err)
 	finally:
+		# todo: might not be necessary now that perf2prof is awaited
 		debug('no child left behind...')
 		while True:
 			try:
