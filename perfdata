@@ -24,22 +24,9 @@ def is_truthy(val):
 def csv(values):
 	return str.join(',', (str(v) for v in values))
 
-signals_overriden=[]
-def signal_append(sig, handler_next):
-	handler_prev = signal.getsignal(sig)
-	# default SIGINT (and possibly other) handler is indistinguishable from user handler
-	if sig not in signals_overriden:
-		signals_overriden.append(sig)
-		handler_prev = None
-	def handler(signum, frame):
-		if callable(handler_prev):
-			handler_prev(signum, frame)
-		handler_next(signum, frame)
-	signal.signal(sig, handler)
-
-def signal_append_all(sigs, handler_next):
+def signal_all(sigs, handler):
 	for sig in sigs:
-		signal_append(sig, handler_next)
+		signal.signal(sig, handler)
 
 def get_profile_dir_default(name):
 	XDG_CACHE_HOME = Path(os.environ.get('XDG_CACHE_HOME') or Path(os.environ['HOME']) / '.cache')
@@ -89,8 +76,9 @@ async def attach_prof(pids, output_path, binaries):
 			'--pid', csv(pids),
 		stdout=perf_write, stderr=sys.stderr,
 	)
-	os.close(perf_write) # belongs to perf_proc now
 	try:
+		os.close(perf_write) # belongs to perf_proc now
+
 		binary_args = [b for b in binaries for b in ['--binary', str(b)]]
 		perf2prof_proc = await asyncio.create_subprocess_exec(
 			str(perf2prof_exe), '/dev/stdin', *binary_args, '--output', str(prof_output_part),
@@ -117,24 +105,6 @@ async def attach_prof(pids, output_path, binaries):
 		raise
 
 
-async def start_command_proc(command, exe_path):
-	# this is the main user process - it gets priority on stdin and stdout
-	command_proc = await asyncio.create_subprocess_exec(
-		str(exe_path), *command[1:],
-		stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
-	)
-	try:
-		def handler(signum, frame):
-			signame = signal.strsignal(signum)
-			debug(f"shutting down on {signame}")
-			command_proc.terminate()
-		signal_append_all([signal.SIGINT, signal.SIGTERM, signal.SIGQUIT], handler)
-		return command_proc
-	except:
-		command_proc.terminate()
-		raise
-
-
 async def attach_perfdata(pids, output_path):
 	output_path.mkdir(parents=True, exist_ok=True)
 
@@ -157,9 +127,14 @@ async def attach_perfdata(pids, output_path):
 				'--pid', csv(pids),
 		stdout=sys.stderr, stderr=sys.stderr,
 	)
-	debug(f"attached {perf_proc.pid} to {pids}")
+	try:
+		debug(f"attached {perf_proc.pid} to {pids}")
+		await perf_proc.communicate()
+	except:
+		debug(f"terminating {perf_proc.pid}")
+		perf_proc.terminate()
+		raise
 
-	await perf_proc.communicate()
 	# os.chmod() is not recursive - use system chmod instead
 	chmod_exe = shutil.which('chmod')
 	await asyncio.create_subprocess_exec(
@@ -194,22 +169,25 @@ async def main_collect(args):
 	exe_path = Path(shutil.which(command[0]) or Path(command[0]).resolve()).absolute()
 	exe_path.is_file() or _raise(Exception(f"{exe_path} not found (is it a shell builtin?)"))
 
-	command_proc = await start_command_proc(command, exe_path)
-	try:
-		def attach():
-			pids = {command_proc.pid}
-			output_path = setup_output_path(exe_path, pids)
-			if args.format == 'perfdata':
-				return attach_perfdata(pids, output_path)
-			elif args.format == 'prof':
-				return attach_prof(pids, output_path, args.binary or [exe_path])
+	def attach(pids):
+		output_path = setup_output_path(exe_path, pids)
+		if args.format == 'perfdata':
+			return attach_perfdata(pids, output_path)
+		elif args.format == 'prof':
+			return attach_prof(pids, output_path, args.binary or [exe_path])
 
-		async with asyncio.TaskGroup() as tg:
-			tg.create_task(attach())
-			tg.create_task(command_proc.communicate())
-	except:
-		command_proc.terminate()
-		raise
+	async with asyncio.TaskGroup() as tg:
+		# this is the main user process - it gets priority on stdin and stdout
+		command_proc = await asyncio.create_subprocess_exec(
+			str(exe_path), *command[1:],
+			stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
+		)
+		try:
+			tg.create_task(attach({command_proc.pid}))
+			await command_proc.communicate()
+		except:
+			command_proc.terminate()
+			raise
 
 	return command_proc.returncode
 
@@ -277,17 +255,8 @@ async def main_attach(args):
 
 	attached_procs = {} # { target_pid: task }
 
-	from threading import Event
-
-	done_waiting = Event()
-	def handler(signum, frame):
-		signame = signal.strsignal(signum)
-		debug(f"ending wait on {signame}")
-		done_waiting.set()
-	signal_append_all([signal.SIGINT, signal.SIGTERM, signal.SIGQUIT], handler)
-
 	async with asyncio.TaskGroup() as tg:
-		while not done_waiting.is_set():
+		while True:
 			all_pids = (
 				{args.pid} if args.pid
 				else get_matching_pids(lambda p: extract_exe_path(p, on_error=on_extract_error).samefile(Path(args.path).absolute()) and match_user(p)) if args.path
@@ -337,11 +306,25 @@ if __name__ == '__main__':
 
 	args = cli.parse_args()
 
-	if args.pid or args.path or args.name:
-		assert(not args.command)
-		asyncio.run(main_attach(args))
-	elif args.command:
-		assert(not args.pid and not args.path and not args.name)
-		asyncio.run(main_collect(args))
-	else:
-		cli.print_help()
+	def handler(signum, frame):
+		signame = signal.strsignal(signum)
+		raise SystemExit(f"shutting down on {signame}")
+	signal_all([signal.SIGINT, signal.SIGTERM, signal.SIGQUIT], handler)
+
+	try:
+		if args.pid or args.path or args.name:
+			assert(not args.command)
+			asyncio.run(main_attach(args))
+		elif args.command:
+			assert(not args.pid and not args.path and not args.name)
+			asyncio.run(main_collect(args))
+		else:
+			cli.print_help()
+	except (KeyboardInterrupt, SystemExit) as err: debug(err)
+	finally:
+		debug('no child left behind...')
+		while True:
+			try:
+				pid, status = os.waitpid(-1, 0)
+				debug(f"reaped {pid}")
+			except ChildProcessError: break # done
